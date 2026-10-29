@@ -240,6 +240,44 @@ async function run() {
   await call(K1, 'ack_receipt', { p_request_id: rid(), p_receipt_id: rA.id, p_status: 'confirmed', p_note: null });
   eq('אישור קבלה של הילד לא יוצר תקבול נוסף', (await totals(K1, A)).received, bAck.received);
 
+  // ---------------------------------------------------- טעויות של ילד
+  head('תיקון טעויות: ילד או הורה מבטלים רישום שנעשה בטעות');
+  const instOf = async (c, id) => (await call(c, 'get_state')).instances.find(i => i.id === id);
+  const bW = await totals(K1, A);
+  const oneOff = await newJob(A, 700, 'ניקיון חדר');
+  await call(K1, 'submit_job', { p_request_id: rid(), p_instance_id: oneOff, p_template_id: null, p_child_id: null, p_note: null });
+  await expectErr('ילד לא יכול לבטל סימון של אח', K2, 'withdraw_report', { p_request_id: rid(), p_kind: 'job', p_id: oneOff }, 'forbidden');
+  const wr = rid();
+  const [w1, w2] = await Promise.all([1, 2].map(() => tryCall(K1, 'withdraw_report', { p_request_id: wr, p_kind: 'job', p_id: oneOff })));
+  check('לחיצה כפולה על "סימנתי בטעות": שתי הבקשות חזרו בלי שגיאה', !w1.error && !w2.error, JSON.stringify([w1.error?.message, w2.error?.message]));
+  eq('עבודה חד-פעמית שסומנה בטעות חזרה ל"לביצוע"', (await instOf(K1, oneOff)).status, 'todo');
+  const tplSub = (await call(K1, 'submit_job', { p_request_id: rid(), p_instance_id: null, p_template_id: tpl, p_child_id: null, p_note: null })).instance_id;
+  await call(K1, 'withdraw_report', { p_request_id: rid(), p_kind: 'job', p_id: tplSub });
+  eq('ביצוע של עבודה קבועה שסומן בטעות בוטל', (await instOf(K1, tplSub)).status, 'cancelled');
+  const pInc = (await call(K1, 'report_income', { p_request_id: rid(), p_child_id: A, p_kind: 'gift', p_amount_cents: 3000, p_date: null,
+    p_source: 'סבתא', p_payer_member_id: null, p_description: null, p_received: true, p_method: 'cash' })).income_id;
+  await expectErr('ילד לא יכול לבטל דיווח הכנסה של אח', K2, 'withdraw_report', { p_request_id: rid(), p_kind: 'income', p_id: pInc }, 'forbidden');
+  await call(K1, 'withdraw_report', { p_request_id: rid(), p_kind: 'income', p_id: pInc });
+  const pExp = (await call(K1, 'report_expense', { p_request_id: rid(), p_child_id: A, p_amount_cents: 400, p_date: null,
+    p_description: 'גלידה', p_allow_negative: false })).expense_id;
+  await call(K1, 'withdraw_report', { p_request_id: rid(), p_kind: 'expense', p_id: pExp });
+  const sW = await call(P, 'get_state');
+  eq('דיווח הכנסה שבוטל לא ממתין יותר לאישור', sW.incomes.find(i => i.id === pInc)?.status, 'rejected');
+  eq('דיווח הוצאה שבוטל לא ממתין יותר לאישור', sW.expenses.find(e => e.id === pExp)?.status, 'rejected');
+  check('הביטולים נשמרו ביומן השינויים', ['withdraw_job', 'withdraw_income', 'withdraw_expense'].every(a => sW.audit.some(x => x.action === a)));
+  const aW = await totals(K1, A);
+  check('הסכומים לא השתנו מכל הסימונים והביטולים', aW.balance === bW.balance && aW.earned_work === bW.earned_work && aW.owed === bW.owed
+    && aW.points_month === bW.points_month, JSON.stringify([bW, aW]));
+  const someApproved = sW.incomes.find(i => i.child_id === A && i.status === 'active').id;
+  await expectErr('ילד לא יכול לבטל בעצמו הכנסה שכבר אושרה', K1, 'withdraw_report', { p_request_id: rid(), p_kind: 'income', p_id: someApproved }, 'bad_status');
+  await call(K1, 'submit_job', { p_request_id: rid(), p_instance_id: oneOff, p_template_id: null, p_child_id: null, p_note: null });
+  await expectErr('ילד לא יכול להשתמש ב"לא בוצע" של הורה', K1, 'review_job', { p_request_id: rid(), p_instance_id: oneOff, p_action: 'reopen', p_note: null, p_price_cents: null }, 'forbidden');
+  await call(P, 'review_job', { p_request_id: rid(), p_instance_id: oneOff, p_action: 'reopen', p_note: 'עוד לא סיים', p_price_cents: null });
+  const rOne = await instOf(P, oneOff);
+  check('הורה סימן "לא בוצע": העבודה חזרה ל"לביצוע" עם הסבר', rOne.status === 'todo' && rOne.note === 'עוד לא סיים', JSON.stringify(rOne));
+  await call(P, 'review_job', { p_request_id: rid(), p_instance_id: inst10, p_action: 'approve', p_note: null, p_price_cents: null });
+  await expectErr('"לא בוצע" על עבודה שכבר אושרה נחסם (מתקנים דרך ביטול האישור)', P, 'review_job', { p_request_id: rid(), p_instance_id: inst10, p_action: 'reopen', p_note: null, p_price_cents: null }, 'bad_status');
+
   // ---------------------------------------------------- סיסמה
   head('איפוס סיסמה על ידי הורה');
   const tmp = 'Tmp-' + Math.random().toString(36).slice(2, 10);
