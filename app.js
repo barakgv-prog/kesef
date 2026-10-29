@@ -308,9 +308,11 @@ function renderChildJobs() {
       <div class="row between" style="margin-top:8px"><span class="small muted">משלם: ${payerName(a)}${waiting ? ` · ${waiting} ממתין לאישור` : ''}</span>
       <button class="btn mint" data-act="submit" data-tpl="${t.id}" data-rid="${uuid()}">סיימתי ✓</button></div></div>`; }).join('')
       : '<p class="muted">אין כרגע עבודות קבועות.</p>'}
-    ${pend.length ? `<h2>ממתין לאישור</h2><div class="card list">${pend.map(instRow).join('')}</div>` : ''}
+    ${pend.length ? `<h2>ממתין לאישור</h2><div class="card list">${pend.map(i => instRow(i) + withdrawBtn('job', i.id, 'סימנתי בטעות')).join('')}</div>` : ''}
     ${done.length ? `<h2>לאחרונה</h2><div class="card list">${done.map(instRow).join('')}</div>` : ''}`;
 }
+const withdrawBtn = (kind, id, label) => `<div class="row" style="padding-bottom:10px">
+  <button class="btn ghost sm" data-act="withdraw" data-kind="${kind}" data-id="${id}" data-rid="${uuid()}">↩️ ${label}</button></div>`;
 const instRow = i => `<div class="item"><div class="emo">${JOB[i.status][0]}</div><div class="grow"><b>${esc(i.title)}</b>
   ${isParent() ? ` · ${nameOf(i.child_id)}` : ''}<div class="small muted">${fmtDate(i.job_date)} · ${money(i.price_cents)}</div>
   ${i.note ? `<div class="small muted">💬 ${esc(i.note)}</div>` : ''}</div>${jobChip(i.status)}</div>`;
@@ -333,8 +335,11 @@ function renderParentJobs() {
       <button class="btn sm mint" data-act="review" data-id="${i.id}" data-a="approve">אישור</button>
       <button class="btn sm ghost" data-act="review" data-id="${i.id}" data-a="edit_price">שינוי מחיר</button>
       <button class="btn sm ghost" data-act="review" data-id="${i.id}" data-a="cancel">ביטול</button></div>`).join('')}</div>` : '<p class="muted">אין.</p>'}
-    <h2>לאחרונה</h2>${recent.length ? `<div class="card list">${recent.map(instRow).join('')}</div>` : '<p class="muted">אין.</p>'}`;
+    <h2>לאחרונה</h2>${recent.length ? `<div class="card list">${recent.map(i => { const inc = jobIncome(i);
+      return instRow(i) + (inc ? `<div class="row" style="padding-bottom:10px">
+        <button class="btn ghost sm" data-act="void" data-kind="income" data-id="${inc.id}">↩️ ביטול אישור</button></div>` : ''); }).join('')}</div>` : '<p class="muted">אין.</p>'}`;
 }
+const jobIncome = i => i.status === 'approved' && S.incomes.find(x => x.job_instance_id === i.id && x.status === 'active');
 
 // ---------------------------------------------------------------- owed
 function owedGroups(childId) {
@@ -384,25 +389,27 @@ const ST = {
   pending: chip('c-pending', '⏳ ממתין לאישור'), rejected: chip('c-cancel', '✖️ נדחה'), voided: chip('c-cancel', '↩️ בוטל'),
   approved: chip('c-approved', '✅ אושר'), active: ''
 };
-function historyRow(h) {
+function historyRow(h, withName) {
   const o = h.o, P = isParent();
+  const who = withName ? `${nameOf(o.child_id)} · ` : '';
+  const wd = o.status === 'pending' ? `<button class="btn ghost sm" data-act="withdraw" data-kind="${h.t}" data-id="${o.id}" data-rid="${uuid()}">↩️ ביטול, נרשם בטעות</button>` : '';
   if (h.t === 'income') return `<div class="item"><div class="emo">${KIND[o.kind].split(' ')[0]}</div><div class="grow">
-    <b>הכנסה: ${esc(o.description)}</b><div class="small muted">${fmtDate(o.income_date)} · ${KIND[o.kind].slice(2)} · ${payerName(o)}</div>
+    <b>${who}הכנסה: ${esc(o.description)}</b><div class="small muted">${fmtDate(o.income_date)} · ${KIND[o.kind].slice(2)} · ${payerName(o)}</div>
     ${o.void_reason ? `<div class="small muted">סיבת ביטול: ${esc(o.void_reason)}</div>` : ''}
     ${o.review_note ? `<div class="small muted">💬 ${esc(o.review_note)}</div>` : ''}
-    ${P && o.status === 'active' ? `<button class="btn ghost sm" data-act="void" data-kind="income" data-id="${o.id}">תיקון / ביטול</button>` : ''}</div>
+    ${P && o.status === 'active' ? `<button class="btn ghost sm" data-act="void" data-kind="income" data-id="${o.id}">תיקון / ביטול</button>` : ''}${wd}</div>
     <div class="center"><div>+${money(o.amount_cents)}</div>${ST[o.status]} ${payChip(o)}</div></div>`;
   if (h.t === 'receipt') return `<div class="item"><div class="emo">💵</div><div class="grow">
-    <b>תקבול מ${payerName(o)}</b><div class="small muted">${fmtDate(o.received_date)} · ${METHOD[o.method]}${o.note ? ' · ' + esc(o.note) : ''}</div>
+    <b>${who}תקבול מ${payerName(o)}</b><div class="small muted">${fmtDate(o.received_date)} · ${METHOD[o.method]}${o.note ? ' · ' + esc(o.note) : ''}</div>
     ${o.child_ack === 'confirmed' ? '<div class="small">✔ הילד אישר קבלה</div>' : o.child_ack === 'disputed' ? `<div class="small" style="color:var(--berry)">✋ סומן "לא קיבלתי"${o.ack_note ? ': ' + esc(o.ack_note) : ''}</div>` : ''}
     ${o.void_reason ? `<div class="small muted">סיבת ביטול: ${esc(o.void_reason)}</div>` : ''}
     ${P && o.status === 'active' ? `<button class="btn ghost sm" data-act="void" data-kind="receipt" data-id="${o.id}">ביטול תשלום</button>` : ''}</div>
     <div class="center">${money(o.amount_cents)} ${ST[o.status]}</div></div>`;
-  return `<div class="item"><div class="emo">🛒</div><div class="grow"><b>הוצאה: ${esc(o.description)}</b>
+  return `<div class="item"><div class="emo">🛒</div><div class="grow"><b>${who}הוצאה: ${esc(o.description)}</b>
     <div class="small muted">${fmtDate(o.expense_date)}</div>
     ${o.review_note ? `<div class="small muted">💬 ${esc(o.review_note)}</div>` : ''}
     ${o.void_reason ? `<div class="small muted">סיבת ביטול: ${esc(o.void_reason)}</div>` : ''}
-    ${P && (o.status === 'approved') ? `<button class="btn ghost sm" data-act="void" data-kind="expense" data-id="${o.id}">ביטול הוצאה</button>` : ''}</div>
+    ${P && (o.status === 'approved') ? `<button class="btn ghost sm" data-act="void" data-kind="expense" data-id="${o.id}">ביטול הוצאה</button>` : ''}${wd}</div>
     <div class="center">−${money(o.amount_cents)} ${ST[o.status]}</div></div>`;
 }
 function renderHistory(childId) {
@@ -411,7 +418,7 @@ function renderHistory(childId) {
     <div class="seg" role="radiogroup" aria-label="סינון">${[['all', 'הכול'], ['income', 'הכנסות'], ['receipt', 'תקבולים'], ['expense', 'הוצאות']].map(([k, l]) =>
       `<label><input type="radio" name="hist" value="${k}" data-act="histFilter" ${filters.histType === k ? 'checked' : ''}>${l}</label>`).join('')}</div>
     <p class="note">הכנסה = מה שהרווחת. תקבול = כסף שהגיע אליך בפועל. תשלום חוב הוא תקבול, לא הכנסה חדשה.</p>
-    ${items.length ? `<div class="card list">${items.map(historyRow).join('')}</div>` : '<p class="muted">אין עדיין רישומים.</p>'}`;
+    ${items.length ? `<div class="card list">${items.map(h => historyRow(h)).join('')}</div>` : '<p class="muted">אין עדיין רישומים.</p>'}`;
 }
 
 // --------------------------------------------------------------- family
@@ -467,6 +474,7 @@ function renderApprovals() {
       <div class="row" style="margin-top:10px"><button class="btn mint" data-act="approveJob" data-id="${i.id}" data-rid="${uuid()}">✔ אישור</button>
       <button class="btn ghost sm" data-act="review" data-id="${i.id}" data-a="approve">אישור במחיר אחר</button>
       <button class="btn ghost sm" data-act="review" data-id="${i.id}" data-a="needs_fix">🔧 נדרש תיקון</button>
+      <button class="btn ghost sm" data-act="review" data-id="${i.id}" data-a="reopen">↩️ לא בוצע</button>
       <button class="btn ghost sm" data-act="review" data-id="${i.id}" data-a="cancel">ביטול</button></div></div>`).join('')}` : ''}
     ${inc.length ? `<h2>דיווחי הכנסה</h2>${inc.map(i => `<div class="card"><div class="row between"><h3>${nameOf(i.child_id)} · ${KIND[i.kind]}</h3>${money(i.amount_cents)}</div>
       <div class="small muted">${fmtDate(i.income_date)} · מ: ${payerName(i)} · ${esc(i.description)} · ${i.reported_received ? 'הכסף כבר התקבל' : 'הכסף עוד לא התקבל (יירשם כחוב)'}</div>
@@ -482,8 +490,21 @@ function renderApprovals() {
       <div class="small muted">משלם: ${payerName(r)}${r.ack_note ? ' · 💬 ' + esc(r.ack_note) : ''}</div>
       <p class="note">אם התשלום נרשם בטעות, בטלו אותו. אם הכסף ניתן, דברו עם ${g(mem(r.child_id), 'הילדה', 'הילד')}.</p>
       <button class="btn ghost sm" data-act="void" data-kind="receipt" data-id="${r.id}">ביטול התשלום</button></div>`).join('')}` : ''}
+    ${fixSection()}
     <h2>ילדים</h2><div class="kid-cards">${kids().map(k => `<button class="card profile" data-act="openChild" data-id="${k.id}">
       <span class="av">${avatar(k)}</span>${esc(k.display_name)}<div class="small muted">מגיע: ${money(k.totals.owed)} · נשאר: ${money(k.totals.balance)}</div></button>`).join('')}</div>`;
+}
+
+// רישומים אחרונים של כל הילדים, עם כפתור תיקון ליד כל אחד
+function fixSection() {
+  const items = kids().flatMap(k => historyItems(k.id))
+    .filter(h => h.o.status === 'active' || h.o.status === 'approved')
+    .sort((a, b) => b.c.localeCompare(a.c)).slice(0, 12);
+  if (!items.length) return '';
+  return `<h2>🛠️ תיקון טעויות</h2>
+    <p class="note">משהו נרשם בטעות? ליד כל רישום יש כפתור ביטול. שום דבר לא נמחק: הרישום מסומן כמבוטל, עם הסיבה, ביומן השינויים.
+    רישומים ישנים יותר נמצאים בהיסטוריה של כל ילד.</p>
+    <div class="card list">${items.map(h => historyRow(h, true)).join('')}</div>`;
 }
 
 function renderPay() {
@@ -524,7 +545,8 @@ const ACTION_LBL = {
   approve_job: 'אישור עבודה', needs_fix: 'בקשת תיקון', cancel_job: 'ביטול עבודה', change_price: 'שינוי מחיר', report_income: 'רישום הכנסה',
   approve_income: 'אישור הכנסה', reject_income: 'דחיית הכנסה', record_payment: 'רישום תשלום', ack_receipt: 'אישור/בירור קבלה',
   report_expense: 'רישום הוצאה', approve_expense: 'אישור הוצאה', reject_expense: 'דחיית הוצאה', void_income: 'ביטול הכנסה',
-  void_receipt: 'ביטול תשלום', void_expense: 'ביטול הוצאה', export: 'ייצוא גיבוי', restore: 'שחזור מגיבוי'
+  void_receipt: 'ביטול תשלום', void_expense: 'ביטול הוצאה', reopen_job: 'עבודה סומנה בטעות', withdraw_job: 'ביטול סימון עבודה',
+  withdraw_income: 'ביטול דיווח הכנסה', withdraw_expense: 'ביטול דיווח הוצאה', export: 'ייצוא גיבוי', restore: 'שחזור מגיבוי'
 };
 
 function renderAdmin() {
@@ -699,11 +721,12 @@ function dlgJob(tplId) {
 
 function dlgReview(id, action) {
   const i = S.instances.find(x => x.id === id);
-  const T = { approve: '✔ אישור עבודה', needs_fix: '🔧 בקשת תיקון', cancel: 'ביטול עבודה', edit_price: 'שינוי מחיר' };
+  const T = { approve: '✔ אישור עבודה', needs_fix: '🔧 בקשת תיקון', cancel: 'ביטול עבודה', edit_price: 'שינוי מחיר', reopen: '↩️ העבודה לא בוצעה' };
   openDialog(T[action], `<p><b>${nameOf(i.child_id)} · ${esc(i.title)}</b> · ${money(i.price_cents)}</p>
     ${action === 'approve' || action === 'edit_price' ? `<label class="f">מחיר (₪)</label><input class="in" name="price" inputmode="decimal" value="${fmtNum(i.price_cents)}" required>` : ''}
     <label class="f">${action === 'needs_fix' ? 'מה צריך לתקן?' : 'הערה (לא חובה)'}</label><input class="in" name="note" ${action === 'needs_fix' ? 'required' : ''}>
-    ${action === 'approve' ? '<p class="note">אחרי האישור המחיר נשמר כפי שסוכם, והסכום נרשם כחוב לילד עד שישולם.</p>' : ''}`,
+    ${action === 'approve' ? '<p class="note">אחרי האישור המחיר נשמר כפי שסוכם, והסכום נרשם כחוב לילד עד שישולם.</p>' : ''}
+    ${action === 'reopen' ? `<p class="note">${i.template_id ? 'הסימון יבוטל. העבודה הקבועה נשארת, ואפשר לסמן אותה שוב כשתבוצע.' : 'העבודה תחזור ל"לביצוע".'} שום סכום לא נרשם.</p>` : ''}`,
     async fd => {
       await rpc('review_job', { p_request_id: this_rid(fd), p_instance_id: id, p_action: action, p_note: fd.get('note'),
         p_price_cents: fd.get('price') ? needMoney(fd.get('price')) : null });
@@ -852,6 +875,9 @@ document.addEventListener('click', ev => {
     case 'submit': runBtn(b, async () => {
       await rpc('submit_job', { p_request_id: d.rid, p_instance_id: d.inst || null, p_template_id: d.tpl || null, p_child_id: d.child || null, p_note: null });
       return isParent() ? 'נרשם. אפשר לאשר במסך האישורים.' : 'כל הכבוד! 🎉 נשלח לאישור הורה';
+    }); break;
+    case 'withdraw': if (confirm('לבטל את הרישום הזה? הוא לא יימחק, רק יסומן כמבוטל.')) runBtn(b, async () => {
+      await rpc('withdraw_report', { p_request_id: d.rid, p_kind: d.kind, p_id: d.id }); return 'בוטל ✔';
     }); break;
     case 'approveJob': runBtn(b, async () => {
       await rpc('review_job', { p_request_id: d.rid, p_instance_id: d.id, p_action: 'approve', p_note: null, p_price_cents: null }); return 'אושר ✔';
