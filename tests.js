@@ -26,6 +26,7 @@ async function expectErr(name, c, fn, args, hint) {
   const ok = !!error && (!hint || error.hint === hint || error.code === hint);
   check(name, ok, error ? `${error.code || ''} ${error.hint || ''} ${error.message}` : 'הבקשה הצליחה למרות שהייתה צריכה להיחסם: ' + JSON.stringify(data));
 }
+const kids2 = s => s.members.filter(m => m.role === 'child');
 async function totals(c, childId) {
   const s = await call(c, 'get_state');
   return s.members.find(m => m.id === childId).totals;
@@ -278,6 +279,52 @@ async function run() {
   await call(P, 'review_job', { p_request_id: rid(), p_instance_id: inst10, p_action: 'approve', p_note: null, p_price_cents: null });
   await expectErr('"לא בוצע" על עבודה שכבר אושרה נחסם (מתקנים דרך ביטול האישור)', P, 'review_job', { p_request_id: rid(), p_instance_id: inst10, p_action: 'reopen', p_note: null, p_price_cents: null }, 'bad_status');
 
+  // ---------------------------------------------------- עבודה מזדמנת, בונוס וקופה
+  head('ילד מוסיף עבודה מזדמנת, בונוס מאבא/אמא, "בקופה שלי"');
+  const bP = await totals(K1, A);
+  const pj = await call(K1, 'propose_job', { p_request_id: rid(), p_child_id: A, p_title: 'סידור המחסן', p_description: null,
+    p_price_cents: 1200, p_payer_member_id: PID, p_payer_name: null, p_date: null, p_done: true });
+  eq('עבודה שהילד הוסיף ("כבר עשיתי") ממתינה לאישור', pj.status, 'pending');
+  eq('עבודה שהילד הוסיף לא נכנסת לסכומים לפני אישור', (await totals(K1, A)).earned_work, bP.earned_work);
+  const pj2 = await call(K1, 'propose_job', { p_request_id: rid(), p_child_id: A, p_title: 'שטיפת כלים', p_description: null,
+    p_price_cents: 500, p_payer_member_id: null, p_payer_name: 'סבתא', p_date: null, p_done: false });
+  eq('"אני רוצה לעשות" נכנס לרשימת העבודות לביצוע', pj2.status, 'todo');
+  await expectErr('ילד לא יכול להוסיף עבודה בשם אח', K2, 'propose_job', { p_request_id: rid(), p_child_id: A, p_title: 'x', p_description: null,
+    p_price_cents: 500, p_payer_member_id: PID, p_payer_name: null, p_date: null, p_done: true }, 'forbidden');
+  await expectErr('עבודה בלי מחיר נחסמת', K1, 'propose_job', { p_request_id: rid(), p_child_id: A, p_title: 'x', p_description: null,
+    p_price_cents: 0, p_payer_member_id: PID, p_payer_name: null, p_date: null, p_done: true }, 'bad_amount');
+  await call(P, 'review_job', { p_request_id: rid(), p_instance_id: pj.instance_id, p_action: 'approve', p_note: null, p_price_cents: 1000 });
+  let tP = await totals(K1, A);
+  eq('הורה אישר במחיר אחר: הרווחתי עלה ב-10 ₪ (לא 12)', tP.earned_work - bP.earned_work, 1000);
+  eq('עבודה מזדמנת שאושרה נותנת נקודה', tP.points_month - bP.points_month, 1);
+
+  const bon = await call(K1, 'report_income', { p_request_id: rid(), p_child_id: A, p_kind: 'bonus', p_amount_cents: 2000, p_date: null,
+    p_source: null, p_payer_member_id: PID, p_description: 'תעודה', p_received: true, p_method: 'cash' });
+  eq('בונוס שהילד דיווח ממתין לאישור', bon.status, 'pending');
+  await expectErr('בונוס חייב להגיע מאבא או מאמא', K1, 'report_income', { p_request_id: rid(), p_child_id: A, p_kind: 'bonus', p_amount_cents: 2000,
+    p_date: null, p_source: 'השכן', p_payer_member_id: null, p_description: null, p_received: true, p_method: 'cash' }, 'bad_payer');
+  await call(P, 'review_income', { p_request_id: rid(), p_income_id: bon.income_id, p_action: 'approve', p_note: null });
+  const tBon = await totals(K1, A);
+  eq('אחרי אישור הבונוס: קיבלתי עלה ב-20 ₪', tBon.received - tP.received, 2000);
+  eq('בונוס לא נכנס ל"הרווחתי מעבודה"', tBon.earned_work, tP.earned_work);
+  eq('בונוס לא נותן נקודה', tBon.points_month, tP.points_month);
+  const pBon = await call(P, 'report_income', { p_request_id: rid(), p_child_id: B, p_kind: 'bonus', p_amount_cents: 1500, p_date: null,
+    p_source: null, p_payer_member_id: PID, p_description: 'הפתעה', p_received: false, p_method: 'cash' });
+  eq('בונוס שהורה רושם נכנס מיד', pBon.status, 'active');
+  check('בונוס שעוד לא ניתן נרשם ב"מגיע לי"', (await totals(K2, B)).owed >= 1500);
+  check('בונוס מאושר מופיע בפיד המשפחתי', (await call(K1, 'get_state')).feed.some(f => f.kind === 'bonus' && f.child_id === B));
+
+  await call(K1, 'set_piggy', { p_request_id: rid(), p_child_id: A, p_cents: 4250 });
+  const sK1 = await call(K1, 'get_state');
+  eq('הילד רשם כמה יש בקופה', sK1.members.find(m => m.id === A).piggy_cents, 4250);
+  eq('רישום הקופה לא משנה את "נשאר לי"', (await totals(K1, A)).balance, tBon.balance);
+  await expectErr('ילד לא יכול לרשום קופה של אח', K2, 'set_piggy', { p_request_id: rid(), p_child_id: A, p_cents: 1 }, 'forbidden');
+  await expectErr('סכום שלילי בקופה נחסם', K1, 'set_piggy', { p_request_id: rid(), p_child_id: A, p_cents: -5 }, 'bad_amount');
+  check('אח לא רואה כמה יש בקופה של אחיו', (await call(K2, 'get_state')).members.find(m => m.id === A).piggy_cents === undefined);
+  eq('הורה רואה את הקופה', (await call(P, 'get_state')).members.find(m => m.id === A).piggy_cents, 4250);
+  await call(K1, 'set_piggy', { p_request_id: rid(), p_child_id: A, p_cents: 0 });
+  eq('אפשר לרשום קופה ריקה (0)', (await call(K1, 'get_state')).members.find(m => m.id === A).piggy_cents, 0);
+
   // ---------------------------------------------------- סיסמה
   head('איפוס סיסמה על ידי הורה');
   const tmp = 'Tmp-' + Math.random().toString(36).slice(2, 10);
@@ -317,6 +364,25 @@ async function run() {
   check('ייצוא אחרי שחזור זהה לגיבוי בכל הטבלאות הכספיות', same);
   const kAfter = await call(K1, 'get_state');
   check('הילדים עדיין מחוברים אחרי שחזור', kAfter.me.id === A);
+
+  // ---------------------------------------------------- איפוס
+  head('איפוס כל הנתונים');
+  await expectErr('ילד לא יכול לאפס', K1, 'reset_family_activity', { p_request_id: rid(), p_confirm: 'איפוס' }, 'forbidden');
+  await expectErr('איפוס בלי לכתוב "איפוס" נחסם', P, 'reset_family_activity', { p_request_id: rid(), p_confirm: 'כן' }, 'confirm_required');
+  const before = await call(P, 'export_family');
+  const rr = rid();
+  const [x1, x2] = await Promise.all([1, 2].map(() => tryCall(P, 'reset_family_activity', { p_request_id: rr, p_confirm: 'איפוס' })));
+  check('איפוס כפול עם אותו מזהה: שתי הבקשות חזרו בלי שגיאה', !x1.error && !x2.error, JSON.stringify([x1.error?.message, x2.error?.message]));
+  const sR = await call(P, 'get_state');
+  check('אחרי איפוס אין עבודות, הכנסות, תשלומים או הוצאות', !sR.instances.length && !sR.incomes.length && !sR.receipts.length
+    && !sR.expenses.length && !sR.templates.length, JSON.stringify([sR.instances.length, sR.incomes.length, sR.receipts.length, sR.expenses.length]));
+  check('בני המשפחה נשארו', sR.members.length === before.data.members.length);
+  check('כל הסכומים חזרו לאפס', kids2(sR).every(m => m.totals.balance === 0 && m.totals.owed === 0 && m.totals.earned_work === 0 && m.piggy_cents === null));
+  check('האיפוס נרשם ביומן', sR.audit.some(a => a.action === 'reset_family'));
+  const kR = await call(K1, 'get_state');
+  check('הילד עדיין מחובר ורואה מסך ריק', kR.me.id === A && kR.members.find(m => m.id === A).totals.balance === 0);
+  const back = await call(P, 'restore_family', { p_backup: before, p_dry_run: false });
+  check('אפשר לשחזר את מה שהיה לפני האיפוס מהגיבוי', back.ok && back.verified, JSON.stringify(back));
 
   if (document.getElementById('purge').checked) {
     head('ניקוי');
