@@ -35,7 +35,7 @@ const fmtDate = d => { if (!d) return ''; const [y, m, dd] = String(d).slice(0, 
 const fmtDT = t => new Intl.DateTimeFormat('he-IL', { timeZone: TZ, dateStyle: 'short', timeStyle: 'short' }).format(new Date(t));
 const monthName = ym => { const [y, m] = ym.split('-'); return new Intl.DateTimeFormat('he-IL', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(Date.UTC(+y, +m - 1, 15))); };
 const DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
-const KIND = { job: '🏠 עבודה בבית', external_job: '🧰 עבודה בחוץ', gift: '🎁 מתנה', allowance: '🪙 דמי כיס', other: '✨ אחר' };
+const KIND = { job: '🏠 עבודה בבית', external_job: '🧰 עבודה בחוץ', gift: '🎁 מתנה', allowance: '🪙 דמי כיס', other: '✨ אחר', bonus: '⭐ בונוס' };
 const METHOD = { cash: 'מזומן', bit: 'ביט / אפליקציה', transfer: 'העברה', other: 'אחר' };
 const JOB = {
   todo: ['🔵', 'לביצוע', 'c-todo'], pending: ['⏳', 'ממתין לאישור', 'c-pending'], approved: ['✅', 'אושר', 'c-approved'],
@@ -84,6 +84,7 @@ async function start() {
 }
 
 async function boot() {
+  seen = null;
   try {
     const w = await rpc('whoami');
     if (!w.member) return w.family_exists ? renderNotLinked() : renderSetup();
@@ -102,8 +103,118 @@ async function load() {
     S = await rpc('get_state');
     if (!view.tab) view.tab = isParent() ? 'approvals' : 'home';
     render();
+    announce();
   } finally { loading = false; }
 }
+
+// ---------------------------------------------- עדכונים חיים: פרצוף שמח, צליל והקראה
+// משווים את המצב החדש למה שהמכשיר כבר ראה (נשמר במכשיר), ומכריזים על כל שינוי.
+let seen = null;
+const seenKey = () => 'kesef-seen-' + S.me.id;
+function stateKeys() {
+  const k = [];
+  S.instances.forEach(i => k.push(`i:${i.id}:${i.status}`));
+  S.receipts.forEach(r => k.push(`r:${r.id}:${r.status}:${r.child_ack}`));
+  S.incomes.forEach(i => k.push(`n:${i.id}:${i.status}`));
+  S.expenses.forEach(e => k.push(`e:${e.id}:${e.status}`));
+  if (!isParent()) S.feed.forEach(f => { if (f.child_id !== S.me.id) k.push(`f:${f.id}`); });
+  return k;
+}
+function announce() {
+  const keys = stateKeys();
+  let prev = seen;
+  if (!prev) { try { const s = localStorage.getItem(seenKey()); prev = s ? new Set(JSON.parse(s)) : null; } catch { prev = null; } }
+  seen = new Set(keys);
+  try { localStorage.setItem(seenKey(), JSON.stringify(keys)); } catch { }
+  if (!prev) return;                       // פעם ראשונה במכשיר: לא מכריזים על כל ההיסטוריה
+  const msgs = keys.filter(x => !prev.has(x)).map(eventMsg).filter(Boolean);
+  if (msgs.length > 4) { const more = msgs.length - 3; msgs.splice(3); msgs.push(['📬', `ועוד ${more} עדכונים`]); }
+  msgs.forEach(m => celebrate(m[0], m[1]));
+}
+function eventMsg(key) {
+  const [t, id, st, ack] = key.split(':');
+  const nm = o => mem(o.child_id)?.display_name || '';
+  const kd = o => mem(o.child_id);
+  const from = o => o.payer_member_id ? (mem(o.payer_member_id)?.display_name || '') : (o.payer_name || '');
+  if (t === 'i') {
+    const i = S.instances.find(x => x.id === id); if (!i) return null; const k = kd(i);
+    if (st === 'todo') return (i.note || '').includes('בטעות') ? ['↩️', `${i.title} חזרה לרשימה של ${nm(i)}`]
+      : ['🧹', `${nm(i)} ${g(k, 'קיבלה', 'קיבל')} עבודה חדשה: ${i.title}`];
+    if (st === 'pending') return ['⏳', `${nm(i)} ${g(k, 'סיימה', 'סיים')} ${i.title}, ${isParent() ? 'מחכה לאישור שלך' : 'מחכה לאישור'}`];
+    if (st === 'approved') return ['🎉', `${nm(i)} ${g(k, 'הרוויחה', 'הרוויח')} ${moneyTxt(i.price_cents)} על ${i.title}`];
+    if (st === 'needs_fix') return ['🔧', `${i.title}: צריך תיקון`];
+    return null;
+  }
+  if (t === 'r') {
+    const r = S.receipts.find(x => x.id === id); if (!r || st !== 'active') return null; const k = kd(r);
+    if (ack === 'confirmed') return ['🤝', `${nm(r)} ${g(k, 'אישרה', 'אישר')} שקיבל${g(k, 'ה', '')} ${moneyTxt(r.amount_cents)} מ${from(r)}`];
+    if (ack === 'disputed') return ['✋', `${nm(r)} ${g(k, 'סימנה', 'סימן')} שלא קיבל${g(k, 'ה', '')} ${moneyTxt(r.amount_cents)}`];
+    if (r.note === 'התקבל יחד עם ההכנסה') return null;     // ההכנסה עצמה כבר מוכרזת
+    return ['💵', `${nm(r)} ${g(k, 'קיבלה', 'קיבל')} ${moneyTxt(r.amount_cents)} מ${from(r)}`];
+  }
+  if (t === 'n') {
+    const i = S.incomes.find(x => x.id === id); if (!i) return null; const k = kd(i);
+    if (st === 'pending') return ['📝', `${nm(i)} ${g(k, 'דיווחה', 'דיווח')} על ${KIND[i.kind].slice(2)} של ${moneyTxt(i.amount_cents)}`];
+    if (st !== 'active' || i.kind === 'job') return null;
+    if (i.kind === 'bonus') return ['⭐', `${nm(i)} ${g(k, 'קיבלה', 'קיבל')} בונוס של ${moneyTxt(i.amount_cents)} מ${from(i)}`];
+    return ['🎁', `${nm(i)} ${g(k, 'קיבלה', 'קיבל')} ${moneyTxt(i.amount_cents)}: ${i.description}`];
+  }
+  if (t === 'e') {
+    const e = S.expenses.find(x => x.id === id); if (!e) return null; const k = kd(e);
+    if (st === 'pending') return ['🛒', `${nm(e)} ${g(k, 'דיווחה', 'דיווח')} על הוצאה של ${moneyTxt(e.amount_cents)}`];
+    if (st === 'approved') return ['🛒', `הוצאה של ${moneyTxt(e.amount_cents)} על ${e.description} נרשמה`];
+    return null;
+  }
+  if (t === 'f') {
+    const f = S.feed.find(x => x.id === id); if (!f) return null; const k = mem(f.child_id);
+    const work = f.kind === 'job' || f.kind === 'external_job';
+    return ['🎉', `${k?.display_name || ''} ${work ? g(k, 'הרוויחה', 'הרוויח') : g(k, 'קיבלה', 'קיבל')} ${moneyTxt(f.amount_cents)} על ${f.description}`];
+  }
+  return null;
+}
+
+const celebQ = []; let celebBusy = false;
+function celebrate(emo, text) { celebQ.push([emo, text]); if (!celebBusy) nextCelebration(); }
+function nextCelebration() {
+  const it = celebQ.shift(); if (!it) { celebBusy = false; return; }
+  celebBusy = true;
+  const d = document.createElement('div'); d.className = 'celebrate'; d.setAttribute('role', 'status');
+  d.innerHTML = `<div class="c-face" aria-hidden="true">😄</div><div class="c-emo" aria-hidden="true">${it[0]}</div><div class="c-txt"></div>`;
+  d.querySelector('.c-txt').textContent = it[1];
+  document.body.appendChild(d);
+  if (soundOn()) { chime(); say(it[1]); }
+  let tm;
+  const done = () => { clearTimeout(tm); d.remove(); setTimeout(nextCelebration, 250); };
+  tm = setTimeout(done, 4500); d.onclick = done;
+}
+
+const soundOn = () => { try { return localStorage.getItem('kesef-sound') !== 'off'; } catch { return true; } };
+let actx = null;
+function audioCtx() {
+  try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch { }
+  return actx;
+}
+document.addEventListener('pointerdown', audioCtx, { once: true });   // דפדפנים מאפשרים צליל רק אחרי נגיעה ראשונה
+function chime() {
+  const c = audioCtx(); if (!c) return;
+  const t0 = c.currentTime;
+  [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => {
+    const o = c.createOscillator(), gn = c.createGain(), t = t0 + i * 0.11;
+    o.type = 'sine'; o.frequency.value = f;
+    gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(0.25, t + 0.02); gn.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
+    o.connect(gn).connect(c.destination); o.start(t); o.stop(t + 0.4);
+  });
+}
+function say(text) {
+  try {
+    if (!('speechSynthesis' in window)) return;
+    const v = speechSynthesis.getVoices().find(x => /^he|^iw/i.test(x.lang));
+    if (!v) return;                                     // בלי קול עברי במכשיר מסתפקים בצליל
+    const u = new SpeechSynthesisUtterance(text.replace(/₪/g, 'שקלים')); u.lang = v.lang; u.voice = v;
+    setTimeout(() => speechSynthesis.speak(u), 450);
+  } catch { }
+}
+try { speechSynthesis.getVoices(); } catch { }
 
 function startLive() {
   stopLive();
@@ -209,6 +320,7 @@ function render() {
     <span aria-hidden="true">${ic}</span>${l}${k === 'approvals' && pc ? `<b class="badge">${pc}</b>` : ''}</button>`).join('');
   const top = `<div class="top"><div class="who">${esc(S.family.name)}${S.family.is_test ? ' · 🧪 משפחת בדיקה' : ''}</div>
     <div class="row"><span class="who">${avatar(S.me)} ${esc(S.me.display_name)}</span>
+    <button class="btn ghost sm" data-act="sound" aria-label="${soundOn() ? 'כיבוי צלילים' : 'הפעלת צלילים'}" title="צלילים">${soundOn() ? '🔔' : '🔕'}</button>
     <button class="btn ghost sm" data-act="logout">החלפת משתמש</button></div></div>`;
   let body = '';
   const t = view.tab;
@@ -284,7 +396,30 @@ function renderChildHome(id) {
       <button class="btn mint" data-act="tab" data-tab="jobs"><span aria-hidden="true">✅</span>סיימתי עבודה</button>
       <button class="btn sky" data-act="income" data-id="${id}"><span aria-hidden="true">💵</span>קיבלתי כסף</button>
       <button class="btn berry" data-act="expense" data-id="${id}"><span aria-hidden="true">🛒</span>הוצאתי כסף</button>
-    </div><h2>היעד שלי</h2>${goalCard(m, true)}`;
+    </div>
+    <h2>הוספה</h2>${addMenu()}
+    <h2>הקופה שלי</h2>${piggyCard(m)}
+    <h2>היעד שלי</h2>${goalCard(m, true)}`;
+}
+
+// התפריט: עבודה קבועה / עבודה מזדמנת / בונוס מאבא או מאמא
+const addMenu = () => `<div class="actions">
+  <button class="btn mint" data-act="addFixed"><span aria-hidden="true">🔁</span>עבודה קבועה</button>
+  <button class="btn sky" data-act="addOnce"><span aria-hidden="true">⚡</span>עבודה מזדמנת</button>
+  <button class="btn grape" data-act="addBonus"><span aria-hidden="true">⭐</span>בונוס מאבא/אמא</button></div>`;
+
+// "בקופה שלי": מה שהילד ספר, לעומת "נשאר לי" לפי הרישומים
+function piggyCard(m) {
+  const P = isParent(), has = m.piggy_cents !== null && m.piggy_cents !== undefined;
+  const bal = m.totals.balance, diff = has ? m.piggy_cents - bal : 0;
+  const fix = P && diff !== 0 && m.totals.opening + diff >= 0;
+  return `<div class="card"><div class="row between"><h3>🐷 בקופה ${P ? 'של ' + esc(m.display_name) : 'שלי'}</h3>
+    <button class="btn ${has ? 'ghost ' : ''}sm" data-act="piggy" data-id="${m.id}">${has ? 'עדכון' : 'רישום כמה יש'}</button></div>
+    ${has ? `<div class="piggy-val">${money(m.piggy_cents)}</div><div class="small muted">נספר ב-${fmtDT(m.piggy_at)}</div>
+      ${diff === 0 ? '<div class="small">✔ בדיוק כמו "נשאר לי" באפליקציה</div>'
+        : `<div class="small">לפי האפליקציה נשאר ${money(bal)}. ${diff > 0 ? `בקופה יש ${money(diff)} יותר.` : `בקופה חסרים ${money(-diff)}.`}</div>
+          ${fix ? `<p><button class="btn ghost sm" data-act="piggyOpening" data-id="${m.id}" data-rid="${uuid()}">להתאים את "נשאר לי" לקופה</button></p>` : ''}`}`
+      : `<p class="small muted">${P ? 'הילד עוד לא רשם' : 'ספרו את הכסף בקופה ורשמו כאן'} כמה יש בקופה. זה עוזר לבדוק שהרישומים נכונים.</p>`}</div>`;
 }
 
 // --------------------------------------------------------------- jobs
@@ -295,13 +430,13 @@ function renderChildJobs() {
   const open = inst.filter(i => i.status === 'todo' || i.status === 'needs_fix');
   const pend = inst.filter(i => i.status === 'pending');
   const done = inst.filter(i => i.status === 'approved' || i.status === 'cancelled').slice(0, 15);
-  return `<h1>🧹 עבודות</h1>
-    ${open.length ? `<h2>לביצוע</h2>${open.map(i => `<div class="card"><div class="row between"><h3>${esc(i.title)}</h3>${jobChip(i.status)}</div>
+  return `<h1>🧹 עבודות</h1>${addMenu()}
+    ${open.length ? `<h2>⚡ לביצוע</h2>${open.map(i => `<div class="card"><div class="row between"><h3>${esc(i.title)}</h3>${jobChip(i.status)}</div>
       ${i.description ? `<div class="muted small">${esc(i.description)}</div>` : ''}
       ${i.status === 'needs_fix' && i.note ? `<div class="banner b-warn small" style="margin-top:8px">🔧 ${esc(i.note)}</div>` : ''}
       <div class="row between" style="margin-top:8px"><span>${money(i.price_cents)} · משלם: ${payerName(i)}</span>
       <button class="btn mint" data-act="submit" data-inst="${i.id}" data-rid="${uuid()}">סיימתי ✓</button></div></div>`).join('')}` : ''}
-    <h2>עבודות קבועות</h2>
+    <h2>🔁 עבודות קבועות</h2>
     ${tpls.length ? tpls.map(t => { const a = t.assignees.find(x => x.child_id === me); const waiting = pend.filter(p => p.template_id === t.id).length;
       return `<div class="card"><div class="row between"><h3>🔁 ${esc(t.title)}</h3><span>${money(a.price_cents)}</span></div>
       ${t.description ? `<div class="muted small">${esc(t.description)}</div>` : ''}
@@ -309,7 +444,14 @@ function renderChildJobs() {
       <button class="btn mint" data-act="submit" data-tpl="${t.id}" data-rid="${uuid()}">סיימתי ✓</button></div></div>`; }).join('')
       : '<p class="muted">אין כרגע עבודות קבועות.</p>'}
     ${pend.length ? `<h2>ממתין לאישור</h2><div class="card list">${pend.map(i => instRow(i) + withdrawBtn('job', i.id, 'סימנתי בטעות')).join('')}</div>` : ''}
-    ${done.length ? `<h2>לאחרונה</h2><div class="card list">${done.map(instRow).join('')}</div>` : ''}`;
+    ${done.length ? `<h2>לאחרונה</h2><div class="card list">${done.map(instRow).join('')}</div>` : ''}
+    ${bonusList()}`;
+}
+function bonusList() {
+  const bs = S.incomes.filter(i => i.kind === 'bonus' && i.status !== 'rejected').slice(0, 10);
+  return bs.length ? `<h2>⭐ בונוסים</h2><div class="card list">${bs.map(i => `<div class="item"><div class="emo">⭐</div><div class="grow">
+    <b>${isParent() ? nameOf(i.child_id) + ' · ' : ''}${esc(i.description)}</b><div class="small muted">${fmtDate(i.income_date)} · מ${payerName(i)}</div></div>
+    <div class="center">${money(i.amount_cents)} ${ST[i.status]} ${payChip(i)}</div></div>`).join('')}</div>` : '';
 }
 const withdrawBtn = (kind, id, label) => `<div class="row" style="padding-bottom:10px">
   <button class="btn ghost sm" data-act="withdraw" data-kind="${kind}" data-id="${id}" data-rid="${uuid()}">↩️ ${label}</button></div>`;
@@ -320,9 +462,8 @@ const instRow = i => `<div class="item"><div class="emo">${JOB[i.status][0]}</di
 function renderParentJobs() {
   const open = S.instances.filter(i => i.status === 'todo' || i.status === 'needs_fix');
   const recent = S.instances.filter(i => i.status === 'approved' || i.status === 'cancelled').slice(0, 20);
-  return `<h1>🧹 עבודות</h1>
-    <button class="btn big mint" data-act="jobForm">➕ עבודה חדשה</button>
-    <h2>עבודות קבועות</h2>
+  return `<h1>🧹 עבודות</h1>${addMenu()}
+    <h2>🔁 עבודות קבועות</h2>
     ${S.templates.length ? S.templates.map(t => `<div class="card"><div class="row between"><h3>🔁 ${esc(t.title)} ${t.active ? '' : chip('c-cancel', 'מושבת')}</h3>
       <button class="btn ghost sm" data-act="jobForm" data-id="${t.id}">עריכה</button></div>
       ${t.description ? `<div class="muted small">${esc(t.description)}</div>` : ''}
@@ -330,14 +471,15 @@ function renderParentJobs() {
         <div class="small muted">משלם: ${payerName(a)}</div></div>
         ${t.active ? `<button class="btn sm" data-act="submit" data-tpl="${t.id}" data-child="${a.child_id}" data-rid="${uuid()}">רישום ביצוע</button>` : ''}</div>`).join('')}</div>
     </div>`).join('') : '<p class="muted">עוד אין עבודות קבועות.</p>'}
-    <h2>לביצוע / נדרש תיקון</h2>
+    <h2>⚡ לביצוע / נדרש תיקון</h2>
     ${open.length ? `<div class="card list">${open.map(i => `${instRow(i)}<div class="row" style="padding-bottom:10px">
       <button class="btn sm mint" data-act="review" data-id="${i.id}" data-a="approve">אישור</button>
       <button class="btn sm ghost" data-act="review" data-id="${i.id}" data-a="edit_price">שינוי מחיר</button>
       <button class="btn sm ghost" data-act="review" data-id="${i.id}" data-a="cancel">ביטול</button></div>`).join('')}</div>` : '<p class="muted">אין.</p>'}
     <h2>לאחרונה</h2>${recent.length ? `<div class="card list">${recent.map(i => { const inc = jobIncome(i);
       return instRow(i) + (inc ? `<div class="row" style="padding-bottom:10px">
-        <button class="btn ghost sm" data-act="void" data-kind="income" data-id="${inc.id}">↩️ ביטול אישור</button></div>` : ''); }).join('')}</div>` : '<p class="muted">אין.</p>'}`;
+        <button class="btn ghost sm" data-act="void" data-kind="income" data-id="${inc.id}">↩️ ביטול אישור</button></div>` : ''); }).join('')}</div>` : '<p class="muted">אין.</p>'}
+    ${bonusList()}`;
 }
 const jobIncome = i => i.status === 'approved' && S.incomes.find(x => x.job_instance_id === i.id && x.status === 'active');
 
@@ -534,6 +676,7 @@ function renderChildForParent(id) {
     <button class="btn berry" data-act="expense" data-id="${id}"><span>🛒</span>הוצאה</button>
     <button class="btn grape" data-act="tab" data-tab="pay"><span>💸</span>תשלום</button></div>
     <h2>יעד</h2>${goalCard(m, true)}
+    <h2>קופה</h2>${piggyCard(m)}
     ${renderOwed(id).replace(/<h1>.*?<\/h1>/, '<h2>⏳ מגיע</h2>')}
     ${renderHistory(id).replace(/<h1>.*?<\/h1>/, '<h2>📜 היסטוריה</h2>')}`;
 }
@@ -546,7 +689,8 @@ const ACTION_LBL = {
   approve_income: 'אישור הכנסה', reject_income: 'דחיית הכנסה', record_payment: 'רישום תשלום', ack_receipt: 'אישור/בירור קבלה',
   report_expense: 'רישום הוצאה', approve_expense: 'אישור הוצאה', reject_expense: 'דחיית הוצאה', void_income: 'ביטול הכנסה',
   void_receipt: 'ביטול תשלום', void_expense: 'ביטול הוצאה', reopen_job: 'עבודה סומנה בטעות', withdraw_job: 'ביטול סימון עבודה',
-  withdraw_income: 'ביטול דיווח הכנסה', withdraw_expense: 'ביטול דיווח הוצאה', export: 'ייצוא גיבוי', restore: 'שחזור מגיבוי'
+  withdraw_income: 'ביטול דיווח הכנסה', withdraw_expense: 'ביטול דיווח הוצאה', export: 'ייצוא גיבוי', restore: 'שחזור מגיבוי',
+  propose_job: 'עבודה מזדמנת חדשה', set_piggy: 'ספירת קופה', reset_family: 'איפוס כל הנתונים'
 };
 
 function renderAdmin() {
@@ -577,6 +721,14 @@ function renderAdmin() {
       <label class="f" for="restoreFile">שחזור מקובץ גיבוי</label>
       <input class="in" type="file" id="restoreFile" accept="application/json,.json">
       <div id="restoreOut"></div>
+    </div>
+
+    <h2>🧹 איפוס כל הנתונים</h2>
+    <div class="card">
+      <p class="small">מוחק את כל העבודות, ההכנסות, התשלומים וההוצאות, ומאפס יתרות פתיחה, יעדים וקופות. בני המשפחה והסיסמאות נשארים.
+      לפני האיפוס יורד אליכם קובץ גיבוי, ועותק מלא נשמר גם במסד. האיפוס נרשם ביומן השינויים.</p>
+      <label class="f" for="resetConfirm">כדי לאשר כתבו: איפוס</label><input class="in" id="resetConfirm" autocomplete="off">
+      <p><button class="btn berry" data-act="resetAll" data-rid="${uuid()}">איפוס עכשיו</button></p>
     </div>
 
     <h2>📒 יומן שינויים</h2>
@@ -685,15 +837,17 @@ function dlgGoal(id) {
     });
 }
 
-function dlgJob(tplId) {
+function dlgJob(tplId, preset) {
   const t = tplId ? S.templates.find(x => x.id === tplId) : null;
   const ks = kids();
-  const f = openDialog(t ? '✏️ עריכת עבודה קבועה' : '➕ עבודה חדשה', `
-    ${t ? '' : `<label class="f">סוג</label><div class="seg"><label><input type="radio" name="type" value="once" checked>חד פעמית</label>
+  const title = t ? '✏️ עריכת עבודה קבועה' : preset === 'weekly' ? '🔁 עבודה קבועה חדשה' : preset === 'once' ? '⚡ עבודה מזדמנת חדשה' : '➕ עבודה חדשה';
+  const f = openDialog(title, `
+    ${t ? '' : preset ? `<input type="hidden" name="type" value="${preset}">`
+      : `<label class="f">סוג</label><div class="seg"><label><input type="radio" name="type" value="once" checked>חד פעמית</label>
       <label><input type="radio" name="type" value="weekly">קבועה (חוזרת)</label></div>`}
-    <label class="f">שם העבודה</label><input class="in" name="title" required value="${esc(t?.title || '')}" placeholder="למשל: שטיפת רכב">
+    <label class="f">שם העבודה</label><input class="in" name="title" required value="${esc(t?.title || '')}" placeholder="${preset === 'once' ? 'למשל: סידור המחסן' : 'למשל: שטיפת רכב'}">
     <label class="f">תיאור קצר (לא חובה)</label><input class="in" name="desc" value="${esc(t?.description || '')}">
-    <div id="dateBox" ${t ? 'hidden' : ''}><label class="f">תאריך</label><input class="in" type="date" name="date" value="${S.today}"></div>
+    <div id="dateBox" ${t || preset === 'weekly' ? 'hidden' : ''}><label class="f">תאריך</label><input class="in" type="date" name="date" value="${S.today}"></div>
     ${t ? `<label class="row" style="gap:10px;margin-top:12px"><input type="checkbox" name="active" ${t.active ? 'checked' : ''} style="width:22px;height:22px"> פעילה</label>` : ''}
     <label class="f">מי מבצע? (סכום נפרד לכל ילד)</label>
     ${ks.map(k => { const a = t?.assignees.find(x => x.child_id === k.id);
@@ -717,6 +871,77 @@ function dlgJob(tplId) {
       return 'העבודה נשמרה ✔';
     });
   f.querySelectorAll('[name=type]').forEach(r => r.addEventListener('change', () => { f.querySelector('#dateBox').hidden = f.querySelector('[name=type]:checked').value === 'weekly'; }));
+}
+
+// חלון בלי כפתור שמירה (לבחירה מתוך רשימה)
+function openPanel(title, inner) {
+  $dlg.innerHTML = `<div class="panel"><div class="row between"><h2 style="margin:0">${title}</h2>
+    <button type="button" class="btn ghost sm" data-act="closeDlg" aria-label="סגירה">✕</button></div>${inner}</div>`;
+  $dlg.showModal();
+}
+
+// ילד: איזו עבודה קבועה סיימת?
+function dlgFixedPick() {
+  const me = S.me.id;
+  const tpls = S.templates.filter(t => t.active && t.assignees.some(a => a.child_id === me));
+  openPanel('🔁 עבודה קבועה', tpls.length ? `<p class="note">איזו עבודה סיימת? ההורה יאשר, ורק אז הסכום ייכנס.</p>
+    <div class="list">${tpls.map(t => { const a = t.assignees.find(x => x.child_id === me);
+      return `<div class="item"><div class="emo">🔁</div><div class="grow"><b>${esc(t.title)}</b><div class="small muted">${money(a.price_cents)} · משלם: ${payerName(a)}</div></div>
+      <button class="btn mint sm" data-act="submit" data-tpl="${t.id}" data-rid="${uuid()}">סיימתי ✓</button></div>`; }).join('')}</div>`
+    : `<p>עוד אין לך עבודות קבועות. אפשר לבקש מאבא או מאמא להוסיף, או להוסיף בעצמך עבודה מזדמנת.</p>
+      <p><button class="btn sky" data-act="addOnce">⚡ עבודה מזדמנת</button></p>`);
+}
+
+// ילד מוסיף עבודה מזדמנת בעצמו
+function dlgPropose() {
+  openDialog('⚡ עבודה מזדמנת', `
+    <label class="f">מה העבודה?</label><input class="in" name="title" required placeholder="למשל: סידור המחסן">
+    <label class="f">פרטים (לא חובה)</label><input class="in" name="desc">
+    <label class="f">כמה זה שווה? (₪)</label><input class="in" name="price" inputmode="decimal" required>
+    <label class="f">מי משלם?</label>${payerSelect({})}
+    <label class="f">מה המצב?</label>
+    <div class="seg"><label><input type="radio" name="done" value="1" checked>כבר עשיתי</label><label><input type="radio" name="done" value="0">אני רוצה לעשות</label></div>
+    <label class="f">תאריך</label><input class="in" type="date" name="date" value="${S.today}">
+    <p class="note">ההורה יאשר את העבודה ואת המחיר. רק אחרי אישור הסכום נכנס ל"הרווחתי".</p>`,
+    async fd => {
+      const p = readPayer(fd);
+      if (p.payer_member_id === null && !p.payer_name) throw new Error('כתבו מי משלם');
+      const r = await rpc('propose_job', { p_request_id: this_rid(fd), p_child_id: S.me.id, p_title: fd.get('title'), p_description: fd.get('desc'),
+        p_price_cents: needMoney(fd.get('price')), p_payer_member_id: p.payer_member_id, p_payer_name: p.payer_name,
+        p_date: fd.get('date') || null, p_done: fd.get('done') === '1' });
+      return r.status === 'pending' ? 'נשלח לאישור הורה 👍' : 'נוסף לרשימה שלך 👍';
+    }, 'הוספה');
+}
+
+// בונוס מאבא או מאמא: הורה רושם מיד, ילד שולח לאישור
+function dlgBonus(childId) {
+  const P = isParent(), ps = parents();
+  openDialog('⭐ בונוס מאבא/אמא', `
+    ${childId ? '' : `<label class="f">למי?</label><select class="in" name="child">${kids().map(k => `<option value="${k.id}">${esc(k.display_name)}</option>`).join('')}</select>`}
+    <label class="f">ממי?</label>
+    <div class="seg">${ps.map((p, i) => `<label><input type="radio" name="from" value="${p.id}" ${(P ? p.id === S.me.id : i === 0) ? 'checked' : ''}>${esc(p.display_name)}</label>`).join('')}</div>
+    <label class="f">כמה? (₪)</label><input class="in" name="amount" inputmode="decimal" required>
+    <label class="f">על מה?</label><input class="in" name="desc" required placeholder="למשל: תעודה טובה">
+    <label class="f">${P ? 'הכסף כבר ניתן?' : 'הכסף כבר אצלי?'}</label>
+    <div class="seg"><label><input type="radio" name="recv" value="1" checked>כן</label><label><input type="radio" name="recv" value="0">עוד לא (יירשם ב"מגיע לי")</label></div>
+    <p class="note">${P ? 'בונוס לא נותן נקודות בתחרות העבודות.' : 'ההורה יאשר את הבונוס, ורק אז הוא ייכנס לסכומים.'}</p>`,
+    async fd => {
+      const r = await rpc('report_income', { p_request_id: this_rid(fd), p_child_id: childId || fd.get('child'), p_kind: 'bonus',
+        p_amount_cents: needMoney(fd.get('amount')), p_date: null, p_source: null, p_payer_member_id: fd.get('from'),
+        p_description: fd.get('desc'), p_received: fd.get('recv') === '1', p_method: 'cash' });
+      return r.status === 'pending' ? 'נשלח לאישור הורה 👍' : 'הבונוס נרשם ⭐';
+    }, P ? 'רישום' : 'שליחה לאישור');
+}
+
+function dlgPiggy(id) {
+  const m = mem(id);
+  openDialog('🐷 כמה יש בקופה?', `<p class="note">ספרו את כל הכסף שבקופה ורשמו את הסכום. זה לא משנה את הסכומים באפליקציה, רק עוזר להשוות.</p>
+    <label class="f">סכום (₪)</label><input class="in" name="amount" inputmode="decimal" required value="${m.piggy_cents != null ? fmtNum(m.piggy_cents) : ''}">`,
+    async fd => {
+      const v = String(fd.get('amount')).trim(); const c = v === '0' ? 0 : needMoney(v);
+      await rpc('set_piggy', { p_request_id: this_rid(fd), p_child_id: id, p_cents: c });
+      return 'נשמר 🐷';
+    });
 }
 
 function dlgReview(id, action) {
@@ -872,7 +1097,23 @@ document.addEventListener('click', ev => {
     case 'addMember': dlgMember(null); break;
     case 'opening': dlgOpening(d.id); break;
     case 'resetPw': dlgResetPw(d.id); break;
-    case 'submit': runBtn(b, async () => {
+    case 'sound': try { localStorage.setItem('kesef-sound', soundOn() ? 'off' : 'on'); } catch { }
+      if (soundOn()) { chime(); } render(); break;
+    case 'addFixed': if ($dlg.open) $dlg.close(); isParent() ? dlgJob(null, 'weekly') : dlgFixedPick(); break;
+    case 'addOnce': if ($dlg.open) $dlg.close(); isParent() ? dlgJob(null, 'once') : dlgPropose(); break;
+    case 'addBonus': dlgBonus(isParent() ? (view.tab === 'child' ? view.childId : null) : S.me.id); break;
+    case 'piggy': dlgPiggy(d.id); break;
+    case 'piggyOpening': { const m = mem(d.id); const nv = m.totals.opening + (m.piggy_cents - m.totals.balance);
+      if (confirm(`לשנות את יתרת הפתיחה של ${m.display_name} ל-${moneyTxt(nv)}, כך ש"נשאר לי" יהיה ${moneyTxt(m.piggy_cents)}?`)) runBtn(b, async () => {
+        await rpc('set_opening_balance', { p_request_id: d.rid, p_member_id: d.id, p_cents: nv, p_reason: 'התאמה לספירת הקופה' }); return 'עודכן ✔';
+      }); } break;
+    case 'resetAll': { const v = document.getElementById('resetConfirm').value.trim();
+      if (v !== 'איפוס') { alert('כדי לאפס כתבו בתיבה: איפוס'); break; }
+      if (confirm('בטוח? כל העבודות, ההכנסות, התשלומים וההוצאות יימחקו. קובץ גיבוי יירד קודם.')) runBtn(b, async () => {
+        await doExport();
+        await rpc('reset_family_activity', { p_request_id: d.rid, p_confirm: v }); return 'הנתונים אופסו ✔ קובץ הגיבוי ירד למכשיר';
+      }); } break;
+    case 'submit': if ($dlg.open) $dlg.close(); runBtn(b, async () => {
       await rpc('submit_job', { p_request_id: d.rid, p_instance_id: d.inst || null, p_template_id: d.tpl || null, p_child_id: d.child || null, p_note: null });
       return isParent() ? 'נרשם. אפשר לאשר במסך האישורים.' : 'כל הכבוד! 🎉 נשלח לאישור הורה';
     }); break;
