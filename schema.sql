@@ -814,6 +814,49 @@ begin
   return kp.req_done(p_request_id, jsonb_build_object('instance_id', v_i.id));
 end $$;
 
+-- עבודה שסומנה בטעות: עבודה חד-פעמית חוזרת ל"לביצוע"; ביצוע של עבודה קבועה מבוטל (הוא נוצר רק בלחיצה)
+create or replace function kp.reopen_instance(p_i public.job_instances, p_note text) returns void
+language sql as $$
+  update public.job_instances
+     set status = case when p_i.template_id is null then 'todo' else 'cancelled' end,
+         note = p_note, submitted_at = null, reviewed_at = now()
+   where id = p_i.id;
+$$;
+
+-- ביטול דיווח שעוד לא אושר: הילד על הדיווחים שלו, או הורה. דיווח שאושר מתקנים דרך void_record.
+create or replace function public.withdraw_report(p_request_id uuid, p_kind text, p_id uuid)
+returns jsonb language plpgsql security definer set search_path = public, pg_temp as $$
+declare me public.members := kp.me(); v_dup jsonb; v_i public.job_instances; v_inc public.incomes; v_e public.expenses;
+  v_note text;
+begin
+  v_dup := kp.req_start(p_request_id, me, 'withdraw_report'); if v_dup is not null then return v_dup; end if;
+  v_note := case when me.role = 'parent' then 'בוטל על ידי הורה: נרשם בטעות' else 'בוטל: נרשם בטעות' end;
+  if p_kind = 'job' then
+    select * into v_i from public.job_instances where id = p_id and family_id = me.family_id for update;
+    if not found then perform kp.fail('not_found','העבודה לא נמצאה'); end if;
+    perform kp.child_for(me, v_i.child_id);
+    if v_i.status <> 'pending' then perform kp.fail('bad_status','אפשר לבטל רק סימון שעוד ממתין לאישור'); end if;
+    perform kp.reopen_instance(v_i, v_note);
+  elsif p_kind = 'income' then
+    select * into v_inc from public.incomes where id = p_id and family_id = me.family_id for update;
+    if not found then perform kp.fail('not_found','הרישום לא נמצא'); end if;
+    perform kp.child_for(me, v_inc.child_id);
+    if v_inc.status <> 'pending' then perform kp.fail('bad_status','אפשר לבטל רק דיווח שעוד ממתין לאישור'); end if;
+    update public.incomes set status = 'rejected', reviewed_by = me.id, reviewed_at = now(), review_note = v_note where id = v_inc.id;
+  elsif p_kind = 'expense' then
+    select * into v_e from public.expenses where id = p_id and family_id = me.family_id for update;
+    if not found then perform kp.fail('not_found','ההוצאה לא נמצאה'); end if;
+    perform kp.child_for(me, v_e.child_id);
+    if v_e.status <> 'pending' then perform kp.fail('bad_status','אפשר לבטל רק דיווח שעוד ממתין לאישור'); end if;
+    update public.expenses set status = 'rejected', reviewed_by = me.id, reviewed_at = now(), review_note = v_note where id = v_e.id;
+  else
+    perform kp.fail('bad_kind','סוג לא מוכר');
+  end if;
+  perform kp.audit(me, 'withdraw_' || p_kind, case p_kind when 'job' then 'job_instance' else p_kind end, p_id, v_note);
+  perform kp.touch(me.family_id);
+  return kp.req_done(p_request_id, jsonb_build_object('ok', true));
+end $$;
+
 -- אישור / תיקון / ביטול / שינוי מחיר — הורה בלבד. רק אישור יוצר הכנסה.
 create or replace function public.review_job(p_request_id uuid, p_instance_id uuid, p_action text, p_note text, p_price_cents bigint)
 returns jsonb language plpgsql security definer set search_path = public, pg_temp as $$
@@ -850,6 +893,10 @@ begin
     update public.job_instances set status = 'cancelled', note = coalesce(nullif(trim(p_note),''), note),
       reviewed_at = now(), reviewed_by = me.id where id = v_i.id;
     perform kp.audit(me, 'cancel_job', 'job_instance', v_i.id, p_note);
+  elsif p_action = 'reopen' then   -- "לא בוצע": סומן בטעות
+    if v_i.status not in ('pending','needs_fix') then perform kp.fail('bad_status','אפשר להחזיר רק עבודה שממתינה לאישור'); end if;
+    perform kp.reopen_instance(v_i, coalesce(nullif(trim(p_note),''), 'סומן בטעות'));
+    perform kp.audit(me, 'reopen_job', 'job_instance', v_i.id, p_note);
   elsif p_action = 'edit_price' then
     if v_i.status in ('approved','cancelled') then perform kp.fail('price_locked','המחיר של עבודה שאושרה נשמר כפי שסוכם'); end if;
     update public.job_instances set price_cents = kp.cents(p_price_cents) where id = v_i.id;
@@ -1221,7 +1268,7 @@ begin
   for f in select p.oid::regprocedure as sig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
            where n.nspname = 'public' and p.proname in ('setup_family','whoami','get_state','add_member','update_member',
              'set_opening_balance','set_goal','update_settings','reset_child_password','save_template','create_job',
-             'submit_job','review_job','report_income','review_income','record_payment','ack_receipt','report_expense',
+             'submit_job','review_job','withdraw_report','report_income','review_income','record_payment','ack_receipt','report_expense',
              'review_expense','void_record','export_family','restore_family','setup_test_family','purge_test_family',
              'my_family_id') loop
     execute format('grant execute on function %s to authenticated', f.sig);
