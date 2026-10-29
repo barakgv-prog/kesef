@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>בדיקות הכסף שלי</title>
+<style>
+:root{--bg:#fff8ec;--card:#fff;--ink:#2b2340;--muted:#6b6380;--line:#efe6d6;--ok:#1f9c84;--bad:#d23d63}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#1d1a26;--card:#2a2636;--ink:#f4f0ff;--muted:#b5adc8;--line:#3b3550}}
+:root[data-theme="dark"]{--bg:#1d1a26;--card:#2a2636;--ink:#f4f0ff;--muted:#b5adc8;--line:#3b3550}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,"Segoe UI",Arial,sans-serif;line-height:1.5}
+.wrap{max-width:820px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:12px}
+input,button{font:inherit;color:inherit}
+input{width:100%;box-sizing:border-box;padding:10px;border-radius:10px;border:2px solid var(--line);background:var(--bg);margin:4px 0 10px}
+button{padding:12px 18px;border:0;border-radius:12px;background:#ffb547;color:#2b2340;font-weight:700;cursor:pointer;min-height:48px}
+button:disabled{opacity:.5}
+.r{padding:6px 0;border-bottom:1px solid var(--line);display:flex;gap:8px}
+.r .s{font-weight:800;min-width:64px} .ok{color:var(--ok)} .bad{color:var(--bad)}
+.d{color:var(--muted);font-size:13px;direction:ltr;text-align:right;word-break:break-word}
+h2{margin:18px 0 6px;font-size:18px}
+#sum{font-size:20px;font-weight:800}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🧪 בדיקות קבלה — הכסף שלי</h1>
+  <div class="card">
+    <p>הבדיקות רצות מול השרת האמיתי, במשפחת בדיקה נפרדת לגמרי. הן לא נוגעות בנתונים של המשפחה האמיתית.</p>
+    <p>צריך שלושה משתמשי בדיקה ב-Supabase עם <b>אותה סיסמה</b>: <span dir="ltr">test-parent</span>, <span dir="ltr">test-kid1</span>, <span dir="ltr">test-kid2</span>.</p>
+    <label>סיסמת משתמשי הבדיקה<input id="pw" type="password" autocomplete="off" dir="ltr"></label>
+    <label><input id="purge" type="checkbox" checked style="width:auto"> למחוק את משפחת הבדיקה בסוף</label><br><br>
+    <button id="run">הרצת כל הבדיקות</button>
+  </div>
+  <div id="sum"></div>
+  <div class="card" id="out"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.0/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="tests.js"></script>
+</body>
+</html>
