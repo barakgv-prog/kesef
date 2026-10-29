@@ -39,6 +39,8 @@ create table if not exists public.members (
   opening_balance_cents bigint not null default 0 check (opening_balance_cents >= 0),
   goal_name text,
   goal_cents bigint check (goal_cents is null or goal_cents > 0),
+  piggy_cents bigint check (piggy_cents is null or piggy_cents >= 0),   -- כמה הילד ספר בקופה (לא משנה סכומים)
+  piggy_at timestamptz,
   active boolean not null default true,
   created_at timestamptz not null default now(),
   unique (family_id, login_email)
@@ -93,7 +95,7 @@ create table if not exists public.incomes (
   id uuid primary key default gen_random_uuid(),
   family_id uuid not null references public.families(id),
   child_id uuid not null references public.members(id),
-  kind text not null check (kind in ('job','external_job','gift','allowance','other')),
+  kind text not null check (kind in ('job','external_job','gift','allowance','other','bonus')),
   amount_cents bigint not null check (amount_cents > 0),
   income_date date not null,
   description text not null,
@@ -201,6 +203,13 @@ create table if not exists public.restore_snapshots (
   created_at timestamptz not null default now(),
   data jsonb not null
 );
+
+-- עדכונים למסד שכבר הותקן (בטוח להריץ שוב)
+alter table public.members add column if not exists piggy_cents bigint check (piggy_cents is null or piggy_cents >= 0);
+alter table public.members add column if not exists piggy_at timestamptz;
+alter table public.incomes drop constraint if exists incomes_kind_check;
+alter table public.incomes add constraint incomes_kind_check
+  check (kind in ('job','external_job','gift','allowance','other','bonus'));
 
 create index if not exists idx_members_family on public.members(family_id);
 create index if not exists idx_inst_family on public.job_instances(family_id, status);
@@ -541,7 +550,8 @@ begin
           'active', m.active, 'goal_name', m.goal_name, 'goal_cents', m.goal_cents)
         || case when m.role = 'child' then
              (case when v_parent or m.id = me.id
-                then jsonb_build_object('totals', kp.child_totals(m.id, v_month))
+                then jsonb_build_object('totals', kp.child_totals(m.id, v_month),
+                       'piggy_cents', m.piggy_cents, 'piggy_at', m.piggy_at)
                 else jsonb_build_object('totals', (kp.child_totals(m.id, v_month)
                        - 'balance' - 'received' - 'spent' - 'opening' - 'earned_work'))
               end)
@@ -783,6 +793,68 @@ begin
   return kp.req_done(p_request_id, jsonb_build_object('instance_ids', to_jsonb(v_ids)));
 end $$;
 
+-- עבודה מזדמנת שהילד מוסיף בעצמו: "כבר עשיתי" נשלח ישר לאישור, "רוצה לעשות" נכנס לרשימה.
+-- המחיר הוא הצעה; הוא ננעל רק כשהורה מאשר (ואפשר לאשר במחיר אחר).
+create or replace function public.propose_job(p_request_id uuid, p_child_id uuid, p_title text, p_description text,
+  p_price_cents bigint, p_payer_member_id uuid, p_payer_name text, p_date date, p_done boolean)
+returns jsonb language plpgsql security definer set search_path = public, pg_temp as $$
+declare me public.members := kp.me(); v_dup jsonb; v_c public.members; v_name text; v_id uuid; v_done boolean := coalesce(p_done, true);
+begin
+  v_dup := kp.req_start(p_request_id, me, 'propose_job'); if v_dup is not null then return v_dup; end if;
+  v_c := kp.child_for(me, p_child_id);
+  v_name := kp.check_payer(me.family_id, p_payer_member_id, p_payer_name);
+  insert into public.job_instances(family_id, child_id, title, description, price_cents, payer_member_id, payer_name,
+    job_date, status, submitted_at, created_by)
+  values (me.family_id, v_c.id, kp.text_req(p_title,'שם עבודה'), nullif(trim(p_description),''), kp.cents(p_price_cents),
+    p_payer_member_id, v_name, coalesce(p_date, kp.today()),
+    case when v_done then 'pending' else 'todo' end, case when v_done then now() end, me.id)
+  returning id into v_id;
+  perform kp.audit(me, 'propose_job', 'job_instance', v_id, null,
+    jsonb_build_object('title', p_title, 'price', p_price_cents, 'done', v_done));
+  perform kp.touch(me.family_id);
+  return kp.req_done(p_request_id, jsonb_build_object('instance_id', v_id, 'status', case when v_done then 'pending' else 'todo' end));
+end $$;
+
+-- "בקופה שלי": הילד רושם כמה כסף ספר. זה רק לצורך השוואה; הסכומים באפליקציה לא משתנים.
+create or replace function public.set_piggy(p_request_id uuid, p_child_id uuid, p_cents bigint)
+returns jsonb language plpgsql security definer set search_path = public, pg_temp as $$
+declare me public.members := kp.me(); v_dup jsonb; v_c public.members;
+begin
+  v_dup := kp.req_start(p_request_id, me, 'set_piggy'); if v_dup is not null then return v_dup; end if;
+  v_c := kp.child_for(me, p_child_id);
+  if p_cents is null or p_cents < 0 or p_cents > 100000000 then perform kp.fail('bad_amount','סכום לא תקין'); end if;
+  update public.members set piggy_cents = p_cents, piggy_at = now() where id = v_c.id;
+  perform kp.audit(me, 'set_piggy', 'member', v_c.id, null, jsonb_build_object('old', v_c.piggy_cents, 'new', p_cents));
+  perform kp.touch(me.family_id);
+  return kp.req_done(p_request_id, jsonb_build_object('ok', true));
+end $$;
+
+-- איפוס כל הפעילות (עבודות, הכנסות, תשלומים, הוצאות) ושמירת בני המשפחה.
+-- עותק מלא נשמר קודם ב-restore_snapshots, והאיפוס עצמו נרשם ביומן.
+create or replace function public.reset_family_activity(p_request_id uuid, p_confirm text)
+returns jsonb language plpgsql security definer set search_path = public, pg_temp as $$
+declare me public.members := kp.me(); v_dup jsonb; v_snap uuid;
+begin
+  perform kp.require_parent(me);
+  v_dup := kp.req_start(p_request_id, me, 'reset_family_activity'); if v_dup is not null then return v_dup; end if;
+  if trim(coalesce(p_confirm,'')) <> 'איפוס' then perform kp.fail('confirm_required','כדי לאפס צריך לכתוב: איפוס'); end if;
+  perform pg_advisory_xact_lock(hashtext('kesef_restore_' || me.family_id::text));
+  insert into public.restore_snapshots(family_id, created_by, data)
+  values (me.family_id, me.id, kp.export_data(me.family_id)) returning id into v_snap;
+  delete from public.allocations where family_id = me.family_id;
+  delete from public.receipts where family_id = me.family_id;
+  delete from public.expenses where family_id = me.family_id;
+  delete from public.incomes where family_id = me.family_id;
+  delete from public.job_instances where family_id = me.family_id;
+  delete from public.template_assignees where family_id = me.family_id;
+  delete from public.job_templates where family_id = me.family_id;
+  update public.members set opening_balance_cents = 0, goal_name = null, goal_cents = null, piggy_cents = null, piggy_at = null
+  where family_id = me.family_id;
+  perform kp.audit(me, 'reset_family', 'family', me.family_id, 'איפוס כל הפעילות', jsonb_build_object('snapshot_id', v_snap));
+  perform kp.touch(me.family_id);
+  return kp.req_done(p_request_id, jsonb_build_object('ok', true, 'snapshot_id', v_snap));
+end $$;
+
 -- "סיימתי עבודה": מופע קיים, או מופע חדש מתבנית קבועה
 create or replace function public.submit_job(p_request_id uuid, p_instance_id uuid, p_template_id uuid, p_child_id uuid, p_note text)
 returns jsonb language plpgsql security definer set search_path = public, pg_temp as $$
@@ -918,7 +990,11 @@ declare me public.members := kp.me(); v_dup jsonb; v_c public.members; v_inc pub
 begin
   v_dup := kp.req_start(p_request_id, me, 'report_income'); if v_dup is not null then return v_dup; end if;
   v_c := kp.child_for(me, p_child_id);
-  if p_kind not in ('external_job','gift','allowance','other') then perform kp.fail('bad_kind','סוג הכנסה לא תקין'); end if;
+  if p_kind not in ('external_job','gift','allowance','other','bonus') then perform kp.fail('bad_kind','סוג הכנסה לא תקין'); end if;
+  if p_kind = 'bonus' and not exists (select 1 from public.members where id = p_payer_member_id and family_id = me.family_id
+                                      and role = 'parent') then
+    perform kp.fail('bad_payer','בונוס מגיע מאבא או מאמא. בחרו מי נתן.');
+  end if;
   v_name := kp.check_payer(me.family_id, p_payer_member_id, p_source);
   if p_method is not null and p_method not in ('cash','bit','transfer','other') then perform kp.fail('bad_method','אמצעי תשלום לא תקין'); end if;
   insert into public.incomes(family_id, child_id, kind, amount_cents, income_date, description, payer_member_id, payer_name,
@@ -1268,7 +1344,7 @@ begin
   for f in select p.oid::regprocedure as sig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
            where n.nspname = 'public' and p.proname in ('setup_family','whoami','get_state','add_member','update_member',
              'set_opening_balance','set_goal','update_settings','reset_child_password','save_template','create_job',
-             'submit_job','review_job','withdraw_report','report_income','review_income','record_payment','ack_receipt','report_expense',
+             'submit_job','review_job','withdraw_report','propose_job','set_piggy','reset_family_activity','report_income','review_income','record_payment','ack_receipt','report_expense',
              'review_expense','void_record','export_family','restore_family','setup_test_family','purge_test_family',
              'my_family_id') loop
     execute format('grant execute on function %s to authenticated', f.sig);
