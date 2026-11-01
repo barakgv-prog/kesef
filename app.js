@@ -101,7 +101,7 @@ async function load() {
   if (loading) return; loading = true;
   try {
     S = await rpc('get_state');
-    if (!view.tab) view.tab = isParent() ? 'approvals' : 'home';
+    if (!view.tab) view.tab = 'home';
     render();
     announce();
   } finally { loading = false; }
@@ -304,7 +304,7 @@ function renderNotLinked() {
 
 // ------------------------------------------------------------ render
 const TABS_CHILD = [['home', '🏠', 'הבית'], ['jobs', '🧹', 'עבודות'], ['owed', '⏳', 'מגיע לי'], ['history', '📜', 'היסטוריה'], ['family', '👨‍👩‍👧', 'משפחה']];
-const TABS_PARENT = [['approvals', '✅', 'אישורים'], ['pay', '💸', 'תשלומים'], ['jobs', '🧹', 'עבודות'], ['family', '👨‍👩‍👧', 'משפחה'], ['admin', '⚙️', 'ניהול']];
+const TABS_PARENT = [['home', '🏠', 'הבית'], ['approvals', '✅', 'אישורים'], ['pay', '💸', 'תשלומים'], ['jobs', '🧹', 'עבודות'], ['family', '👨‍👩‍👧', 'משפחה'], ['admin', '⚙️', 'ניהול']];
 
 function pendingCount() {
   if (!isParent()) return 0;
@@ -324,7 +324,7 @@ function render() {
     <button class="btn ghost sm" data-act="logout">החלפת משתמש</button></div></div>`;
   let body = '';
   const t = view.tab;
-  if (t === 'home') body = renderChildHome(S.me.id);
+  if (t === 'home') body = isParent() ? renderParentHome() : renderChildHome(S.me.id);
   else if (t === 'jobs') body = isParent() ? renderParentJobs() : renderChildJobs();
   else if (t === 'owed') body = renderOwed(S.me.id);
   else if (t === 'history') body = renderHistory(S.me.id);
@@ -400,6 +400,29 @@ function renderChildHome(id) {
     <h2>הוספה</h2>${addMenu()}
     <h2>הקופה שלי</h2>${piggyCard(m)}
     <h2>היעד שלי</h2>${goalCard(m, true)}`;
+}
+
+// דף הבית של הורה: סיכום משפחתי ולוח קטן לכל ילד
+function renderParentHome() {
+  const ks = kids(), pc = pendingCount();
+  const sum = key => ks.reduce((a, k) => a + (k.totals?.[key] || 0), 0);
+  const mini = (cls, lbl, v) => `<div class="stat ${cls}"><div class="lbl">${lbl}</div><div class="val">${money(v)}</div></div>`;
+  return `<h1>🏠 ${esc(S.family.name)}</h1>
+    ${pc ? `<div class="banner b-warn row between"><span>⏳ ${pc === 1 ? 'דבר אחד מחכה' : `${pc} דברים מחכים`} לאישור שלך</span>
+      <button class="btn sm" data-act="tab" data-tab="approvals">לאישורים</button></div>` : '<div class="banner b-ok">🎉 אין כרגע מה לאשר.</div>'}
+    <div class="stats">
+      <div class="stat s-earn"><div class="ic" aria-hidden="true">🛠️</div><div class="lbl">הרוויחו מעבודה</div><div class="val">${money(sum('earned_work'))}</div><div class="sub">כל הילדים, אחרי אישור</div></div>
+      <div class="stat s-owed"><div class="ic" aria-hidden="true">⏳</div><div class="lbl">מגיע לילדים</div><div class="val">${money(sum('owed'))}</div><div class="sub">אושר ועוד לא שולם</div></div>
+      <div class="stat s-recv"><div class="ic" aria-hidden="true">👛</div><div class="lbl">קיבלו</div><div class="val">${money(sum('received'))}</div><div class="sub">כסף שהגיע בפועל</div></div>
+      <div class="stat s-left"><div class="ic" aria-hidden="true">🐷</div><div class="lbl">נשאר לילדים</div><div class="val">${money(sum('balance'))}</div><div class="sub">לפי הרישומים</div></div>
+    </div>
+    <h2>הילדים</h2>
+    <div class="kid-cards">${ks.map(k => `<div class="card">
+      <div class="row between"><h3>${avatar(k)} ${esc(k.display_name)}</h3>${S.family.competition_enabled ? `<span title="עבודות מאושרות החודש">⭐ ${k.totals.points_month}</span>` : ''}</div>
+      <div class="stats sm">${mini('s-earn', 'הרוויח' + g(k, 'ה', ''), k.totals.earned_work)}${mini('s-owed', 'מגיע', k.totals.owed)}
+        ${mini('s-recv', 'קיבל' + g(k, 'ה', ''), k.totals.received)}${mini('s-left', 'נשאר', k.totals.balance)}</div>
+      <p style="margin-bottom:0"><button class="btn sm" data-act="openChild" data-id="${k.id}">פרטים ופעולות</button></p></div>`).join('')}</div>
+    <h2>הוספה</h2>${addMenu()}`;
 }
 
 // התפריט: עבודה קבועה / עבודה מזדמנת / בונוס מאבא או מאמא
@@ -670,7 +693,7 @@ function renderPay() {
 
 function renderChildForParent(id) {
   const m = mem(id); if (!m) { view.tab = 'approvals'; return renderApprovals(); }
-  return `<button class="btn ghost sm" data-act="tab" data-tab="approvals">→ חזרה</button>
+  return `<button class="btn ghost sm" data-act="tab" data-tab="home">→ חזרה</button>
     <h1>${avatar(m)} ${esc(m.display_name)}</h1>${statCards(m)}
     <div class="actions"><button class="btn sky" data-act="income" data-id="${id}"><span>💵</span>הכנסה / מתנה</button>
     <button class="btn berry" data-act="expense" data-id="${id}"><span>🛒</span>הוצאה</button>
