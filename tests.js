@@ -185,7 +185,7 @@ async function run() {
   await expectErr('ילד מסמן עבודה בשם אח', K1, 'submit_job', { p_request_id: rid(), p_instance_id: null, p_template_id: tpl, p_child_id: B, p_note: null }, 'forbidden');
   await expectErr('ילד מאשר הכנסה שדיווח', K1, 'review_income', { p_request_id: rid(), p_income_id: pend.income_id, p_action: 'approve', p_note: null }, 'forbidden');
   await expectErr('ילד מבטל רישום כספי', K1, 'void_record', { p_request_id: rid(), p_kind: 'income', p_id: inc1, p_reason: 'x', p_mode: null }, 'forbidden');
-  await expectErr('ילד משנה יתרת פתיחה', K1, 'set_opening_balance', { p_request_id: rid(), p_member_id: A, p_cents: 999999, p_reason: 'x' }, 'forbidden');
+  await expectErr('ילד משנה יתרת פתיחה של אח', K1, 'set_opening_balance', { p_request_id: rid(), p_member_id: B, p_cents: 999999, p_reason: 'x' }, 'forbidden');
   await expectErr('ילד מאפס סיסמה לאח', K1, 'reset_child_password', { p_member_id: B, p_new_password: 'hacked123' }, 'forbidden');
   await expectErr('ילד מייצא את נתוני המשפחה', K1, 'export_family', {}, 'forbidden');
   await expectErr('ילד מנסה שחזור', K1, 'restore_family', { p_backup: {}, p_dry_run: true }, 'forbidden');
@@ -280,7 +280,7 @@ async function run() {
   await expectErr('"לא בוצע" על עבודה שכבר אושרה נחסם (מתקנים דרך ביטול האישור)', P, 'review_job', { p_request_id: rid(), p_instance_id: inst10, p_action: 'reopen', p_note: null, p_price_cents: null }, 'bad_status');
 
   // ---------------------------------------------------- עבודה מזדמנת, בונוס וקופה
-  head('ילד מוסיף עבודה מזדמנת, בונוס מאבא/אמא, "בקופה שלי"');
+  head('ילד מוסיף עבודה מזדמנת, בונוס מאבא/אמא');
   const bP = await totals(K1, A);
   const pj = await call(K1, 'propose_job', { p_request_id: rid(), p_child_id: A, p_title: 'סידור המחסן', p_description: null,
     p_price_cents: 1200, p_payer_member_id: PID, p_payer_name: null, p_date: null, p_done: true });
@@ -314,16 +314,205 @@ async function run() {
   check('בונוס שעוד לא ניתן נרשם ב"מגיע לי"', (await totals(K2, B)).owed >= 1500);
   check('בונוס מאושר מופיע בפיד המשפחתי', (await call(K1, 'get_state')).feed.some(f => f.kind === 'bonus' && f.child_id === B));
 
-  await call(K1, 'set_piggy', { p_request_id: rid(), p_child_id: A, p_cents: 4250 });
-  const sK1 = await call(K1, 'get_state');
-  eq('הילד רשם כמה יש בקופה', sK1.members.find(m => m.id === A).piggy_cents, 4250);
-  eq('רישום הקופה לא משנה את "נשאר לי"', (await totals(K1, A)).balance, tBon.balance);
-  await expectErr('ילד לא יכול לרשום קופה של אח', K2, 'set_piggy', { p_request_id: rid(), p_child_id: A, p_cents: 1 }, 'forbidden');
-  await expectErr('סכום שלילי בקופה נחסם', K1, 'set_piggy', { p_request_id: rid(), p_child_id: A, p_cents: -5 }, 'bad_amount');
-  check('אח לא רואה כמה יש בקופה של אחיו', (await call(K2, 'get_state')).members.find(m => m.id === A).piggy_cents === undefined);
-  eq('הורה רואה את הקופה', (await call(P, 'get_state')).members.find(m => m.id === A).piggy_cents, 4250);
-  await call(K1, 'set_piggy', { p_request_id: rid(), p_child_id: A, p_cents: 0 });
-  eq('אפשר לרשום קופה ריקה (0)', (await call(K1, 'get_state')).members.find(m => m.id === A).piggy_cents, 0);
+  const memOf = async (c, id) => (await call(c, 'get_state')).members.find(m => m.id === id);
+  const job = async (child, cents, title) => { const j = await newJob(child, cents, title); await approve(j); return { inst: j, inc: (await incomeOf(j))[0].id }; };
+
+  // ---------------------------------------------------- קופה = יתרת פתיחה + תשלומים שהתקבלו − הוצאות
+  head('הקופה: יתרת פתיחה ותשלומים מצטברים');
+  eq('יתרת פתיחה עוד לא נרשמה', (await memOf(K1, A)).opening_set, false);
+  const bal0 = (await totals(K1, A)).balance;
+  await expectErr('ילד לא רושם יתרת פתיחה לאח', K2, 'set_opening_balance', { p_request_id: rid(), p_member_id: A, p_cents: 100, p_reason: null }, 'forbidden');
+  await call(K1, 'set_opening_balance', { p_request_id: rid(), p_member_id: A, p_cents: 10000, p_reason: null });
+  eq('הילד רשם יתרת פתיחה 100 ₪: הקופה עלתה ב-100 ₪ בדיוק', (await totals(K1, A)).balance - bal0, 10000);
+  await expectErr('אחרי שנרשמה, הילד לא יכול לשנות אותה', K1, 'set_opening_balance', { p_request_id: rid(), p_member_id: A, p_cents: 99999, p_reason: 'x' }, 'opening_locked');
+  await expectErr('תיקון של הורה בלי סיבה נחסם', P, 'set_opening_balance', { p_request_id: rid(), p_member_id: A, p_cents: 9000, p_reason: '' }, 'missing_reason');
+  await call(P, 'set_opening_balance', { p_request_id: rid(), p_member_id: A, p_cents: 9000, p_reason: 'נספר לא נכון' });
+  const mA1 = await memOf(K1, A);
+  eq('תיקון הורה: יתרת פתיחה 90 ₪', mA1.totals.opening, 9000);
+  check('התיקון מוצג בקופה עם הסיבה', mA1.balance_log.some(x => x.reason === 'נספר לא נכון' && x.new === 9000 && x.old === 10000), JSON.stringify(mA1.balance_log));
+  check('התיקון נרשם ביומן', (await call(P, 'get_state')).audit.some(a => a.action === 'correct_balance' && a.entity_id === A));
+
+  // הדוגמה מהבקשה, על ילד ב: פתיחה 100 ₪, תשלום של 10 ₪
+  await call(P, 'set_opening_balance', { p_request_id: rid(), p_member_id: B, p_cents: 10000, p_reason: null });
+  const tB0 = await totals(K2, B);
+  const jB = await job(B, 1000, 'דוגמה 10 ₪');
+  const tB1 = await totals(K2, B);
+  eq('לפני התשלום: הקופה לא השתנתה (חוב לא נכנס לקופה)', tB1.balance, tB0.balance);
+  eq('לפני התשלום: "מגיע לי" עלה ב-10 ₪', tB1.owed - tB0.owed, 1000);
+  const pB = await pay(B, [jB.inc], 1000);
+  const tB2 = await totals(K2, B);
+  eq('אחרי התשלום: הקופה עלתה ב-10 ₪ (נוסף, לא מחליף)', tB2.balance - tB1.balance, 1000);
+  eq('אחרי התשלום: "מגיע לי" ירד ב-10 ₪', tB1.owed - tB2.owed, 1000);
+  eq('יתרת הפתיחה נשארה 100 ₪', tB2.opening, 10000);
+  await call(P, 'void_record', { p_request_id: rid(), p_kind: 'receipt', p_id: pB.receipt_id, p_reason: 'בדיקה', p_mode: null });
+  const tB3 = await totals(K2, B);
+  check('ביטול התשלום החזיר את הקופה ואת החוב בדיוק למצב שלפני', tB3.balance === tB1.balance && tB3.owed === tB1.owed && tB3.received === tB1.received,
+    JSON.stringify([tB1, tB3]));
+  await pay(B, [jB.inc], 1000);
+
+  // ---------------------------------------------------- "קיבלתי תשלום" מהילד, בלי כפילות
+  head('הילד מדווח "קיבלתי תשלום" — ובלי לספור פעמיים');
+  const jR = await job(B, 2000, 'דיווח תשלום');
+  const tR0 = await totals(K2, B);
+  const rep = await call(K2, 'report_receipt', { p_request_id: rid(), p_child_id: B, p_income_ids: [jR.inc], p_amount_cents: 500,
+    p_date: null, p_method: 'cash', p_note: null });
+  eq('דיווח חלקי של 5 ₪ נשמר כ"ממתין"', rep.status, 'pending');
+  const tR1 = await totals(K2, B);
+  check('דיווח ממתין לא משנה את הסכומים', tR1.received === tR0.received && tR1.owed === tR0.owed && tR1.balance === tR0.balance);
+  await expectErr('ילד לא מדווח פעמיים על אותו כסף', K2, 'report_receipt', { p_request_id: rid(), p_child_id: B, p_income_ids: [jR.inc],
+    p_amount_cents: 2000, p_date: null, p_method: 'cash', p_note: null }, 'already_reported');
+  await expectErr('ילד לא מדווח על חוב של אח', K1, 'report_receipt', { p_request_id: rid(), p_child_id: A, p_income_ids: [jR.inc],
+    p_amount_cents: 100, p_date: null, p_method: 'cash', p_note: null }, 'bad_income');
+  await expectErr('הורה שרושם את אותו תשלום שהילד כבר דיווח — נחסם', P, 'record_payment', { p_request_id: rid(), p_child_id: B,
+    p_income_ids: [jR.inc], p_amount_cents: 2000, p_date: null, p_method: 'cash', p_note: null }, 'child_reported');
+  await pay(B, [jR.inc], 1500);
+  eq('הורה יכול לשלם את היתרה (15 ₪)', (await totals(K2, B)).received - tR0.received, 1500);
+  await call(P, 'review_receipt', { p_request_id: rid(), p_receipt_id: rep.receipt_id, p_action: 'approve', p_note: null });
+  const tR2 = await totals(K2, B);
+  eq('אחרי אישור הדיווח: התקבל 20 ₪ בסך הכול (לא יותר)', tR2.received - tR0.received, 2000);
+  eq('החוב נסגר', tR2.owed - tR0.owed, -2000);
+  eq('הקופה עלתה ב-20 ₪', tR2.balance - tR0.balance, 2000);
+  await expectErr('אישור כפול של אותו דיווח נחסם', P, 'review_receipt', { p_request_id: rid(), p_receipt_id: rep.receipt_id, p_action: 'approve', p_note: null }, 'bad_status');
+  // ההורה רשם קודם — הילד רק מאשר קבלה
+  const jR2 = await job(B, 1000, 'הורה רשם קודם');
+  const pR2 = await pay(B, [jR2.inc], 1000);
+  const tR3 = await totals(K2, B);
+  await expectErr('ההורה כבר רשם: דיווח הילד נחסם ומפנה לאישור קבלה', K2, 'report_receipt', { p_request_id: rid(), p_child_id: B,
+    p_income_ids: [jR2.inc], p_amount_cents: 1000, p_date: null, p_method: 'cash', p_note: null }, 'already_recorded');
+  await call(K2, 'ack_receipt', { p_request_id: rid(), p_receipt_id: pR2.receipt_id, p_status: 'confirmed', p_note: null });
+  eq('אישור קבלה לא מוסיף כסף', (await totals(K2, B)).received, tR3.received);
+  // דחייה וביטול עצמי
+  const jR3 = await job(B, 800, 'דחייה');
+  const rep2 = await call(K2, 'report_receipt', { p_request_id: rid(), p_child_id: B, p_income_ids: [jR3.inc], p_amount_cents: 800,
+    p_date: null, p_method: 'bit', p_note: null });
+  await call(P, 'review_receipt', { p_request_id: rid(), p_receipt_id: rep2.receipt_id, p_action: 'reject', p_note: 'לא קיבל עדיין' });
+  const rep3 = await call(K2, 'report_receipt', { p_request_id: rid(), p_child_id: B, p_income_ids: [jR3.inc], p_amount_cents: 800,
+    p_date: null, p_method: 'bit', p_note: null });
+  check('אחרי דחייה אפשר לדווח מחדש', !!rep3.receipt_id);
+  await call(K2, 'withdraw_report', { p_request_id: rid(), p_kind: 'receipt', p_id: rep3.receipt_id });
+  const tR4 = await totals(K2, B);
+  check('דיווח שנדחה ודיווח שבוטל לא שינו כלום', tR4.received === tR3.received && tR4.owed === tR3.owed + 800, JSON.stringify([tR3, tR4]));
+  await expectErr('הורה לא משתמש ב"קיבלתי תשלום" של ילד', P, 'report_receipt', { p_request_id: rid(), p_child_id: B, p_income_ids: [jR3.inc],
+    p_amount_cents: 100, p_date: null, p_method: 'cash', p_note: null }, 'forbidden');
+  // שני מכשירים במקביל: הורה רושם וילד מדווח באותו רגע — נספר פעם אחת בלבד
+  const jR4 = await job(B, 1000, 'במקביל');
+  const tR5 = await totals(K2, B);
+  const both = await Promise.allSettled([pay(B, [jR4.inc], 1000), call(K2, 'report_receipt', { p_request_id: rid(), p_child_id: B,
+    p_income_ids: [jR4.inc], p_amount_cents: 1000, p_date: null, p_method: 'cash', p_note: null })]);
+  for (const x of both) if (x.status === 'fulfilled' && x.value.status === 'pending')
+    await tryCall(P, 'review_receipt', { p_request_id: rid(), p_receipt_id: x.value.receipt_id, p_action: 'approve', p_note: null });
+  eq('הורה וילד במקביל על אותו תשלום: התקבל 10 ₪ פעם אחת', (await totals(K2, B)).received - tR5.received, 1000);
+
+  // ---------------------------------------------------- עריכת עבודה מזדמנת
+  head('עריכת עבודה מזדמנת');
+  const e1 = await newJob(A, 1000, 'לפני עריכה');
+  await call(P, 'edit_job', { p_request_id: rid(), p_instance_id: e1, p_title: 'אחרי עריכה', p_description: 'פרטים', p_price_cents: 1200, p_reason: null });
+  const e1s = await instOf(K1, e1);
+  check('הורה ערך שם, תיאור וסכום לפני אישור', e1s.title === 'אחרי עריכה' && e1s.description === 'פרטים' && e1s.price_cents === 1200, JSON.stringify(e1s));
+  await expectErr('ילד לא עורך עבודה שההורה הוסיף', K1, 'edit_job', { p_request_id: rid(), p_instance_id: e1, p_title: 'x', p_description: null, p_price_cents: 99900, p_reason: null }, 'forbidden');
+  const kp1 = await call(K1, 'propose_job', { p_request_id: rid(), p_child_id: A, p_title: 'שלי', p_description: null,
+    p_price_cents: 900, p_payer_member_id: PID, p_payer_name: null, p_date: null, p_done: true });
+  await call(K1, 'edit_job', { p_request_id: rid(), p_instance_id: kp1.instance_id, p_title: 'שלי, מתוקן', p_description: null, p_price_cents: 800, p_reason: null });
+  const kp1s = await instOf(K1, kp1.instance_id);
+  check('ילד ערך עבודה שהוסיף, והיא עדיין ממתינה לאישור הורה', kp1s.price_cents === 800 && kp1s.status === 'pending', JSON.stringify(kp1s));
+  await expectErr('ילד לא עורך עבודה של אח', K2, 'edit_job', { p_request_id: rid(), p_instance_id: kp1.instance_id, p_title: 'x', p_description: null, p_price_cents: 100, p_reason: null }, 'forbidden');
+  await approve(e1);
+  const e1inc = (await incomeOf(e1))[0].id;
+  await pay(A, [e1inc], 500);
+  const tE0 = await totals(K1, A);
+  await expectErr('אחרי תשלום של 5 ₪ אי אפשר להוריד את הסכום ל-4 ₪', P, 'edit_job', { p_request_id: rid(), p_instance_id: e1, p_title: 'אחרי עריכה', p_description: null, p_price_cents: 400, p_reason: 'x' }, 'below_paid');
+  await expectErr('שינוי סכום של עבודה שאושרה דורש סיבה', P, 'edit_job', { p_request_id: rid(), p_instance_id: e1, p_title: 'אחרי עריכה', p_description: null, p_price_cents: 1500, p_reason: '' }, 'missing_reason');
+  await call(P, 'edit_job', { p_request_id: rid(), p_instance_id: e1, p_title: 'אחרי עריכה', p_description: null, p_price_cents: 1500, p_reason: 'עבד יותר' });
+  const tE1 = await totals(K1, A);
+  check('תיקון סכום אחרי אישור: הרווחתי ומגיע עלו ב-3 ₪, התשלום שהתקבל לא השתנה',
+    tE1.earned_work - tE0.earned_work === 300 && tE1.owed - tE0.owed === 300 && tE1.received === tE0.received && tE1.balance === tE0.balance, JSON.stringify([tE0, tE1]));
+  check('התיקון נרשם ביומן עם הסיבה', (await call(P, 'get_state')).audit.some(a => a.action === 'edit_job' && a.entity_id === e1 && a.reason === 'עבד יותר'));
+  eq('הניקוד לא השתנה מהעריכה', tE1.points_month, tE0.points_month);
+  await expectErr('עבודה קבועה לא נערכת כעבודה מזדמנת', P, 'edit_job', { p_request_id: rid(), p_instance_id: inst10, p_title: 'x', p_description: null, p_price_cents: 100, p_reason: 'x' }, 'not_occasional');
+
+  // ---------------------------------------------------- עבודות קבועות ברשימה האישית
+  head('הוספה והסרה של עבודות קבועות');
+  const pt = await call(K1, 'propose_template', { p_request_id: rid(), p_child_id: A, p_template_id: null, p_title: 'הוצאת הכלב', p_description: null,
+    p_price_cents: 700, p_payer_member_id: PID, p_payer_name: null });
+  eq('עבודה קבועה שהילד הוסיף ממתינה לאישור', pt.approved, false);
+  await expectErr('אי אפשר לסמן "סיימתי" לפני שההורה אישר', K1, 'submit_job', { p_request_id: rid(), p_instance_id: null, p_template_id: pt.template_id, p_child_id: null, p_note: null }, 'not_approved');
+  const k2t = (await call(K2, 'get_state')).templates.find(t => t.id === pt.template_id);
+  check('אח רואה את העבודה (כדי להוסיף לעצמו) אבל לא את המחיר של אחיו', !!k2t && k2t.assignees.length === 0, JSON.stringify(k2t));
+  await call(K2, 'propose_template', { p_request_id: rid(), p_child_id: B, p_template_id: pt.template_id, p_title: null, p_description: null,
+    p_price_cents: 500, p_payer_member_id: PID, p_payer_name: null });
+  await expectErr('אי אפשר להוסיף את אותה עבודה פעמיים', K2, 'propose_template', { p_request_id: rid(), p_child_id: B, p_template_id: pt.template_id,
+    p_title: null, p_description: null, p_price_cents: 500, p_payer_member_id: PID, p_payer_name: null }, 'already_assigned');
+  await expectErr('ילד לא מאשר לעצמו', K1, 'review_assignment', { p_request_id: rid(), p_template_id: pt.template_id, p_child_id: A, p_action: 'approve', p_price_cents: null }, 'forbidden');
+  await call(P, 'review_assignment', { p_request_id: rid(), p_template_id: pt.template_id, p_child_id: A, p_action: 'approve', p_price_cents: 600 });
+  const ptI = (await call(K1, 'submit_job', { p_request_id: rid(), p_instance_id: null, p_template_id: pt.template_id, p_child_id: null, p_note: null })).instance_id;
+  eq('אחרי אישור במחיר אחר: הביצוע במחיר שההורה קבע (6 ₪)', (await instOf(K1, ptI)).price_cents, 600);
+  await approve(ptI);
+  const ptInc = (await incomeOf(ptI))[0].id;
+  const tT0 = await totals(K1, A);
+  await expectErr('ילד לא מסיר עבודה מהרשימה של אח', K2, 'remove_template_assignment', { p_request_id: rid(), p_template_id: pt.template_id, p_child_id: A }, 'forbidden');
+  await call(K1, 'remove_template_assignment', { p_request_id: rid(), p_template_id: pt.template_id, p_child_id: A });
+  const sT = await call(K1, 'get_state');
+  check('העבודה ירדה מהרשימה של הילד', !sT.templates.find(t => t.id === pt.template_id)?.assignees.length);
+  const tT1 = await totals(K1, A);
+  check('ההסרה לא שינתה הכנסות, חובות או קופה', JSON.stringify(tT0) === JSON.stringify(tT1), JSON.stringify([tT0, tT1]));
+  check('הביצוע וההכנסה הקודמים נשארו', sT.instances.some(i => i.id === ptI && i.status === 'approved') && sT.incomes.some(i => i.id === ptInc && i.status === 'active'));
+  const sTP = await call(P, 'get_state');
+  check('העבודה נשארה אצל האח (ממתינה לאישור)', sTP.templates.find(t => t.id === pt.template_id).assignees.some(a => a.child_id === B && !a.approved));
+  await call(P, 'review_assignment', { p_request_id: rid(), p_template_id: pt.template_id, p_child_id: B, p_action: 'reject', p_price_cents: null });
+  check('הורה דחה: העבודה ירדה גם מהאח', !(await call(P, 'get_state')).templates.find(t => t.id === pt.template_id).assignees.length);
+  await call(P, 'remove_template_assignment', { p_request_id: rid(), p_template_id: tpl, p_child_id: A });
+  check('הורה הסיר עבודה קבועה מהרשימה של ילד, והביצועים שלה נשמרו', (await call(P, 'get_state')).instances.some(i => i.template_id === tpl));
+
+  // ---------------------------------------------------- יעדי חיסכון
+  head('יעדי חיסכון: "כולל הקופה" ו"חיסכון חדש"');
+  const gA0 = await totals(K1, A);
+  await call(K1, 'set_goal', { p_request_id: rid(), p_member_id: A, p_name: 'אופניים', p_cents: 1000000, p_mode: 'total' });
+  let mg = await memOf(K1, A);
+  eq('"כולל הכסף שבקופה": ההתקדמות = הקופה', mg.goal_progress, Math.max(0, gA0.balance));
+  eq('יצירת יעד לא שינתה את הקופה', mg.totals.balance, gA0.balance);
+  await call(K1, 'set_goal', { p_request_id: rid(), p_member_id: A, p_name: 'אופניים', p_cents: 1000000, p_mode: 'fresh' });
+  mg = await memOf(K1, A);
+  eq('"חיסכון חדש מעכשיו": מתחיל מאפס', mg.goal_progress, 0);
+  eq('גם עכשיו הקופה לא השתנתה', mg.totals.balance, gA0.balance);
+  const gj = await job(A, 3000, 'לחיסכון');
+  eq('חוב שעוד לא שולם לא נספר ביעד', (await memOf(K1, A)).goal_progress, 0);
+  await pay(A, [gj.inc], 3000);
+  eq('אחרי תשלום של 30 ₪: ההתקדמות 30 ₪', (await memOf(K1, A)).goal_progress, 3000);
+  await call(P, 'report_expense', { p_request_id: rid(), p_child_id: A, p_amount_cents: 1000, p_date: null, p_description: 'ממתק', p_allow_negative: true });
+  eq('הוצאה של 10 ₪ מורידה את ההתקדמות ל-20 ₪', (await memOf(K1, A)).goal_progress, 2000);
+  await call(K1, 'set_goal', { p_request_id: rid(), p_member_id: A, p_name: 'אופניים חדשות', p_cents: 900000, p_mode: 'fresh' });
+  eq('שינוי שם וסכום שומר את נקודת ההתחלה', (await memOf(K1, A)).goal_progress, 2000);
+  await call(P, 'report_expense', { p_request_id: rid(), p_child_id: A, p_amount_cents: 5000, p_date: null, p_description: 'גדולה', p_allow_negative: true });
+  eq('הוצאה גדולה: ההתקדמות לא יורדת מתחת לאפס', (await memOf(K1, A)).goal_progress, 0);
+  const tGb = await totals(K2, B);
+  await call(K2, 'set_goal', { p_request_id: rid(), p_member_id: B, p_name: 'משחק', p_cents: 50000, p_mode: 'total' });
+  await call(P, 'report_expense', { p_request_id: rid(), p_child_id: B, p_amount_cents: 700, p_date: null, p_description: 'ספר', p_allow_negative: true });
+  eq('"כולל הקופה" אחרי הוצאה: ההתקדמות ירדה כמו הקופה', (await memOf(K2, B)).goal_progress, Math.max(0, tGb.balance - 700));
+  check('אח רואה רק אחוזים, לא סכומים', (await memOf(K2, A)).goal_progress === undefined && typeof (await memOf(K2, A)).goal_pct === 'number');
+
+  // ---------------------------------------------------- סנכרון בין מכשירים
+  head('סנכרון בין שני מכשירים');
+  const K1b = mk('k1b');
+  await K1b.auth.signInWithPassword({ email: `test-kid1@${DOMAIN}`, password: pw });
+  let gotEvent = false;
+  const ch = K1b.channel('t-' + fam.family_id).on('postgres_changes', { event: '*', schema: 'public', table: 'change_log',
+    filter: 'family_id=eq.' + fam.family_id }, () => { gotEvent = true; });
+  const subOk = await new Promise(res => { ch.subscribe(s => { if (s === 'SUBSCRIBED') res(true); if (s === 'CHANNEL_ERROR' || s === 'TIMED_OUT') res(false); }); setTimeout(() => res(false), 10000); });
+  check('המכשיר השני מחובר לעדכונים חיים', subOk);
+  const syncJob = await newJob(A, 400, 'סנכרון');
+  for (let i = 0; i < 20 && !gotEvent; i++) await new Promise(r => setTimeout(r, 250));
+  check('המכשיר השני קיבל הודעת עדכון מיד אחרי שההורה הוסיף עבודה', gotEvent);
+  check('המכשיר השני רואה את העבודה החדשה', (await call(K1b, 'get_state')).instances.some(i => i.id === syncJob));
+  await K1b.removeChannel(ch);
+
+  // ---------------------------------------------------- התראות פוש (רישום המכשיר)
+  head('התראות פוש: רישום מכשיר');
+  await expectErr('כתובת מנוי לא תקינה נדחית', K1, 'save_push_subscription', { p_endpoint: 'http://x', p_p256dh: 'a', p_auth: 'b' }, 'bad_subscription');
+  const fakeEp = 'https://push.invalid/test-' + rid();
+  const sv = await tryCall(K1, 'save_push_subscription', { p_endpoint: fakeEp, p_p256dh: 'BTest', p_auth: 'aTest' });
+  check('מכשיר נרשם להתראות', !sv.error, sv.error?.message);
+  const dl = await tryCall(K1, 'delete_push_subscription', { p_endpoint: fakeEp });
+  check('מכשיר בוטל מהתראות', !dl.error, dl.error?.message);
 
   // ---------------------------------------------------- סיסמה
   head('איפוס סיסמה על ידי הורה');
@@ -366,23 +555,47 @@ async function run() {
   check('הילדים עדיין מחוברים אחרי שחזור', kAfter.me.id === A);
 
   // ---------------------------------------------------- איפוס
-  head('איפוס כל הנתונים');
-  await expectErr('ילד לא יכול לאפס', K1, 'reset_family_activity', { p_request_id: rid(), p_confirm: 'איפוס' }, 'forbidden');
-  await expectErr('איפוס בלי לכתוב "איפוס" נחסם', P, 'reset_family_activity', { p_request_id: rid(), p_confirm: 'כן' }, 'confirm_required');
-  const before = await call(P, 'export_family');
+  head('איפוס כספי חד-פעמי');
+  await expectErr('ילד לא יכול לאפס', K1, 'reset_money', { p_request_id: rid(), p_confirm: 'איפוס' }, 'forbidden');
+  await expectErr('איפוס בלי לכתוב "איפוס" נחסם', P, 'reset_money', { p_request_id: rid(), p_confirm: 'כן' }, 'confirm_required');
+  await expectErr('ילד לא רואה את סיכום האיפוס', K1, 'money_reset_preview', {}, 'forbidden');
+  const pv = await call(P, 'money_reset_preview');
+  check('לפני האיפוס מוצג סיכום לכל ילד', pv.kids.length === 2 && pv.records > 0, JSON.stringify(pv).slice(0, 200));
+  const s0 = await call(P, 'get_state');
+  const oldInc = s0.incomes.find(i => i.status === 'active' && i.kind === 'job' && i.child_id === A);
+  const oldOpen = s0.incomes.find(i => i.status === 'active' && i.amount_cents > i.paid_cents && i.child_id === A);
+  const ptsA = s0.members.find(m => m.id === A).totals.points_month;
   const rr = rid();
-  const [x1, x2] = await Promise.all([1, 2].map(() => tryCall(P, 'reset_family_activity', { p_request_id: rr, p_confirm: 'איפוס' })));
+  const [x1, x2] = await Promise.all([1, 2].map(() => tryCall(P, 'reset_money', { p_request_id: rr, p_confirm: 'איפוס' })));
   check('איפוס כפול עם אותו מזהה: שתי הבקשות חזרו בלי שגיאה', !x1.error && !x2.error, JSON.stringify([x1.error?.message, x2.error?.message]));
   const sR = await call(P, 'get_state');
-  check('אחרי איפוס אין עבודות, הכנסות, תשלומים או הוצאות', !sR.instances.length && !sR.incomes.length && !sR.receipts.length
-    && !sR.expenses.length && !sR.templates.length, JSON.stringify([sR.instances.length, sR.incomes.length, sR.receipts.length, sR.expenses.length]));
-  check('בני המשפחה נשארו', sR.members.length === before.data.members.length);
-  check('כל הסכומים חזרו לאפס', kids2(sR).every(m => m.totals.balance === 0 && m.totals.owed === 0 && m.totals.earned_work === 0 && m.piggy_cents === null));
-  check('האיפוס נרשם ביומן', sR.audit.some(a => a.action === 'reset_family'));
+  check('כל הסכומים של כל הילדים חזרו לאפס', kids2(sR).every(m => ['balance', 'owed', 'earned_work', 'received', 'spent', 'opening', 'earned_work_month']
+    .every(k => m.totals[k] === 0)), JSON.stringify(kids2(sR).map(m => m.totals)));
+  check('יתרות הפתיחה פתוחות להזנה מחדש', kids2(sR).every(m => m.opening_set === false));
+  check('רשומות כספיות ישנות לא מוצגות (בארכיון)', !sR.incomes.length && !sR.receipts.length && !sR.expenses.length && !sR.feed.length);
+  check('המשתמשים נשארו', sR.members.length === s0.members.length && sR.members.every(m => s0.members.some(x => x.id === m.id && x.role === m.role)));
+  check('העבודות הקבועות והמחירים נשארו', JSON.stringify(sR.templates) === JSON.stringify(s0.templates));
+  check('העבודות (היסטוריה לא כספית) נשארו', sR.instances.length === s0.instances.length);
+  const gR = sR.members.find(m => m.id === A);
+  check('יעד החיסכון נשאר (שם וסכום), וההתקדמות התאפסה', gR.goal_name === 'אופניים חדשות' && gR.goal_cents === 900000 && gR.goal_progress === 0, JSON.stringify(gR));
+  eq('הניקוד בתחרות לא התאפס', gR.totals.points_month, ptsA);
+  check('ההגדרות נשארו', sR.family.competition_enabled === s0.family.competition_enabled && sR.family.payday === s0.family.payday);
+  check('האיפוס נרשם ביומן, וההיסטוריה הקודמת ביומן נשמרה', sR.audit.some(a => a.action === 'reset_money') && sR.audit.some(a => a.action === 'approve_job'));
+  check('האיפוס מסומן בתאריך', !!sR.family.money_reset_at);
+  await expectErr('הכנסה ישנה לא ניתנת לביטול (לא חוזרת לחישובים)', P, 'void_record', { p_request_id: rid(), p_kind: 'income', p_id: oldInc.id, p_reason: 'x', p_mode: 'keep_as_gift' }, 'not_found');
+  await expectErr('חוב ישן שאופס לא ניתן לתשלום', P, 'record_payment', { p_request_id: rid(), p_child_id: A, p_income_ids: [oldOpen.id],
+    p_amount_cents: 100, p_date: null, p_method: 'cash', p_note: null }, 'bad_income');
+  await expectErr('עבודה ישנה שאושרה לא מאושרת שוב (לא יוצרת חוב מחדש)', P, 'review_job', { p_request_id: rid(), p_instance_id: oldInc.job_instance_id,
+    p_action: 'approve', p_note: null, p_price_cents: null }, 'already_approved');
+  eq('אחרי כל הניסיונות "מגיע" נשאר 0', (await totals(K1, A)).owed, 0);
   const kR = await call(K1, 'get_state');
-  check('הילד עדיין מחובר ורואה מסך ריק', kR.me.id === A && kR.members.find(m => m.id === A).totals.balance === 0);
-  const back = await call(P, 'restore_family', { p_backup: before, p_dry_run: false });
-  check('אפשר לשחזר את מה שהיה לפני האיפוס מהגיבוי', back.ok && back.verified, JSON.stringify(back));
+  check('גם במכשיר של הילד הכול מאופס', kR.me.id === A && kR.members.find(m => m.id === A).totals.balance === 0 && !kR.incomes.length);
+  await call(K1, 'set_opening_balance', { p_request_id: rid(), p_member_id: A, p_cents: 4200, p_reason: null });
+  eq('אחרי האיפוס הילד רושם יתרת פתיחה חדשה', (await totals(K1, A)).balance, 4200);
+  const fresh = await job(A, 1000, 'אחרי איפוס');
+  await pay(A, [fresh.inc], 1000);
+  const tF = await totals(K1, A);
+  check('אחרי האיפוס החישוב מתחיל נקי: 42 + 10 = 52 ₪', tF.balance === 5200 && tF.received === 1000 && tF.owed === 0, JSON.stringify(tF));
 
   if (document.getElementById('purge').checked) {
     head('ניקוי');
