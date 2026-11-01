@@ -181,7 +181,7 @@ async function run() {
   await expectErr('ילד רושם לעצמו תשלום', K1, 'record_payment', { p_request_id: rid(), p_child_id: A, p_income_ids: [inc1], p_amount_cents: 100, p_date: null, p_method: 'cash', p_note: null }, 'forbidden');
   await expectErr('ילד רושם הוצאה לאח', K1, 'report_expense', { p_request_id: rid(), p_child_id: B, p_amount_cents: 100, p_date: null, p_description: 'x', p_allow_negative: true }, 'forbidden');
   await expectErr('ילד רושם הכנסה לאח', K1, 'report_income', { p_request_id: rid(), p_child_id: B, p_kind: 'gift', p_amount_cents: 100, p_date: null, p_source: 'x', p_payer_member_id: null, p_description: null, p_received: true, p_method: 'cash' }, 'forbidden');
-  await expectErr('ילד משנה יעד של אח', K1, 'set_goal', { p_request_id: rid(), p_member_id: B, p_name: 'x', p_cents: 100 }, 'forbidden');
+  await expectErr('ילד משנה יעד של אח', K1, 'set_goal', { p_request_id: rid(), p_member_id: B, p_name: 'x', p_cents: 100, p_mode: 'total' }, 'forbidden');
   await expectErr('ילד מסמן עבודה בשם אח', K1, 'submit_job', { p_request_id: rid(), p_instance_id: null, p_template_id: tpl, p_child_id: B, p_note: null }, 'forbidden');
   await expectErr('ילד מאשר הכנסה שדיווח', K1, 'review_income', { p_request_id: rid(), p_income_id: pend.income_id, p_action: 'approve', p_note: null }, 'forbidden');
   await expectErr('ילד מבטל רישום כספי', K1, 'void_record', { p_request_id: rid(), p_kind: 'income', p_id: inc1, p_reason: 'x', p_mode: null }, 'forbidden');
@@ -334,20 +334,20 @@ async function run() {
 
   // הדוגמה מהבקשה, על ילד ב: פתיחה 100 ₪, תשלום של 10 ₪
   await call(P, 'set_opening_balance', { p_request_id: rid(), p_member_id: B, p_cents: 10000, p_reason: null });
-  const tB0 = await totals(K2, B);
+  const tK0 = await totals(K2, B);
   const jB = await job(B, 1000, 'דוגמה 10 ₪');
-  const tB1 = await totals(K2, B);
-  eq('לפני התשלום: הקופה לא השתנתה (חוב לא נכנס לקופה)', tB1.balance, tB0.balance);
-  eq('לפני התשלום: "מגיע לי" עלה ב-10 ₪', tB1.owed - tB0.owed, 1000);
+  const tK1 = await totals(K2, B);
+  eq('לפני התשלום: הקופה לא השתנתה (חוב לא נכנס לקופה)', tK1.balance, tK0.balance);
+  eq('לפני התשלום: "מגיע לי" עלה ב-10 ₪', tK1.owed - tK0.owed, 1000);
   const pB = await pay(B, [jB.inc], 1000);
-  const tB2 = await totals(K2, B);
-  eq('אחרי התשלום: הקופה עלתה ב-10 ₪ (נוסף, לא מחליף)', tB2.balance - tB1.balance, 1000);
-  eq('אחרי התשלום: "מגיע לי" ירד ב-10 ₪', tB1.owed - tB2.owed, 1000);
-  eq('יתרת הפתיחה נשארה 100 ₪', tB2.opening, 10000);
+  const tK2 = await totals(K2, B);
+  eq('אחרי התשלום: הקופה עלתה ב-10 ₪ (נוסף, לא מחליף)', tK2.balance - tK1.balance, 1000);
+  eq('אחרי התשלום: "מגיע לי" ירד ב-10 ₪', tK1.owed - tK2.owed, 1000);
+  eq('יתרת הפתיחה נשארה 100 ₪', tK2.opening, 10000);
   await call(P, 'void_record', { p_request_id: rid(), p_kind: 'receipt', p_id: pB.receipt_id, p_reason: 'בדיקה', p_mode: null });
-  const tB3 = await totals(K2, B);
-  check('ביטול התשלום החזיר את הקופה ואת החוב בדיוק למצב שלפני', tB3.balance === tB1.balance && tB3.owed === tB1.owed && tB3.received === tB1.received,
-    JSON.stringify([tB1, tB3]));
+  const tK3 = await totals(K2, B);
+  check('ביטול התשלום החזיר את הקופה ואת החוב בדיוק למצב שלפני', tK3.balance === tK1.balance && tK3.owed === tK1.owed && tK3.received === tK1.received,
+    JSON.stringify([tK1, tK3]));
   await pay(B, [jB.inc], 1000);
 
   // ---------------------------------------------------- "קיבלתי תשלום" מהילד, בלי כפילות
@@ -499,9 +499,11 @@ async function run() {
     filter: 'family_id=eq.' + fam.family_id }, () => { gotEvent = true; });
   const subOk = await new Promise(res => { ch.subscribe(s => { if (s === 'SUBSCRIBED') res(true); if (s === 'CHANNEL_ERROR' || s === 'TIMED_OUT') res(false); }); setTimeout(() => res(false), 10000); });
   check('המכשיר השני מחובר לעדכונים חיים', subOk);
+  await new Promise(r => setTimeout(r, 2500));          // השרת מתחיל להעביר שינויים שנייה-שתיים אחרי ההתחברות
   const syncJob = await newJob(A, 400, 'סנכרון');
-  for (let i = 0; i < 20 && !gotEvent; i++) await new Promise(r => setTimeout(r, 250));
-  check('המכשיר השני קיבל הודעת עדכון מיד אחרי שההורה הוסיף עבודה', gotEvent);
+  const t0 = Date.now();
+  for (let i = 0; i < 60 && !gotEvent; i++) await new Promise(r => setTimeout(r, 250));
+  check('המכשיר השני קיבל הודעת עדכון אחרי שההורה הוסיף עבודה', gotEvent, gotEvent ? `אחרי ${Date.now() - t0}ms` : 'לא הגיע תוך 15 שניות');
   check('המכשיר השני רואה את העבודה החדשה', (await call(K1b, 'get_state')).instances.some(i => i.id === syncJob));
   await K1b.removeChannel(ch);
 
