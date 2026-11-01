@@ -9,6 +9,10 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;700;800&display=swap" rel="stylesheet">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐷</text></svg>">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="הכסף שלי">
 <style>
 :root{
   --bg:#fff8ec; --card:#ffffff; --ink:#2b2340; --muted:#6b6380; --line:#efe6d6;
@@ -109,15 +113,20 @@ table.mini{width:100%;border-collapse:collapse;font-size:14px} table.mini td{pad
 .stats.sm .lbl{font-size:13px;font-weight:500} .stats.sm .val{font-size:19px}
 .panel{padding:18px}
 .piggy-val{font-size:28px;font-weight:800;margin:2px 0}
-.celebrate{position:fixed;inset-inline:16px;top:18%;margin:auto;max-width:420px;z-index:60;background:var(--card);
-  border:3px solid var(--sun);border-radius:28px;padding:20px 18px;text-align:center;box-shadow:0 12px 40px rgba(20,15,35,.3);
-  cursor:pointer;animation:pop .35s ease-out}
-.celebrate .c-face{font-size:72px;line-height:1;animation:bounce 1s ease-in-out infinite}
-.celebrate .c-emo{font-size:30px;margin-top:4px}
-.celebrate .c-txt{font-size:20px;font-weight:700;margin-top:8px}
-@keyframes pop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
-@keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
-@media (prefers-reduced-motion:reduce){.celebrate,.celebrate .c-face{animation:none}}
+/* ענן הודעה קטן: לא חוסם את המסך, נסגר לבד / בהחלקה הצידה / ב-✕ */
+.toasts{position:fixed;top:calc(10px + env(safe-area-inset-top));inset-inline:12px;max-width:420px;margin:0 auto;z-index:60;
+  display:flex;flex-direction:column;gap:6px;pointer-events:none}
+.toast{pointer-events:auto;touch-action:pan-y;user-select:none;display:flex;align-items:center;gap:8px;background:var(--card);
+  border:2px solid var(--mint);border-radius:18px;padding:6px 6px 6px 14px;box-shadow:0 6px 20px rgba(20,15,35,.18);
+  font-weight:500;font-size:15px;animation:pop .25s ease-out}
+.toast.t-err{border-color:var(--berry);background:var(--berry-l)}
+.toast .t-txt{flex:1;min-width:0}
+.toast .t-x{flex:none;border:0;background:transparent;color:var(--muted);width:32px;height:32px;border-radius:999px;cursor:pointer;font-size:15px}
+.toast .t-x:hover{background:var(--line)}
+@keyframes pop{from{transform:translateY(-8px);opacity:0}to{transform:none;opacity:1}}
+@media (prefers-reduced-motion:reduce){.toast{animation:none}}
+.seg.col{flex-direction:column}
+.chosen{outline:3px solid var(--sun)}
 @media (max-width:380px){.stat .val{font-size:23px}.actions .btn{font-size:13px}}
 </style>
 </head>
